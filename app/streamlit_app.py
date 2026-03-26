@@ -31,7 +31,9 @@ def upload_file(file, token):
     headers = {"Authorization": f"Bearer {token}"}
     return requests.post(
         f"{BASE_URL}/upload/",
-        files={"file": file},
+        # "files" must match the FastAPI parameter name exactly
+        # Tuple format: (filename, bytes, mimetype) so requests sets Content-Type correctly
+        files={"files": (file.name, file.read())},
         headers=headers
     )
 
@@ -93,7 +95,6 @@ def auth_page():
 def home_page():
     st.title("📊 Ask Your Files")
 
-    # -------- Description --------
     st.markdown("""
 Welcome! This application helps you **understand and analyze your files easily**.
 
@@ -109,7 +110,6 @@ Choose a mode below to get started.
 
     st.divider()
 
-    # -------- Tabs (TOP BAR) --------
     tab1, tab2 = st.tabs(["📄 Ask About Your Document", "📊 Analyze Your Data"])
 
     with tab1:
@@ -130,7 +130,6 @@ Choose a mode below to get started.
 
     st.divider()
 
-    # -------- Logout --------
     if st.button("Logout"):
         st.session_state.token = None
         st.session_state.page = "login"
@@ -143,17 +142,17 @@ def rag_page():
     st.title("📄 Ask About Your Document")
 
     st.subheader("Upload Document")
-    file = st.file_uploader("Upload file")
+    file = st.file_uploader("Upload file", key="rag_uploader")
 
     if st.button("Upload Document"):
         if file:
             res = upload_file(file, st.session_state.token)
-            if res.status_code == 200:
-                st.success("File uploaded")
+            if res.status_code == 202:
+                st.success("File uploaded! Processing in background...")
             else:
                 st.error(res.text)
         else:
-            st.warning("Upload a file")
+            st.warning("Please select a file first")
 
     st.divider()
 
@@ -171,7 +170,6 @@ def rag_page():
             else:
                 st.error(res.text)
 
-    # -------- Summarize --------
     if st.button("Summarize Document"):
         res = query_api("summarize the document", st.session_state.token)
         if res.status_code == 200:
@@ -189,17 +187,17 @@ def sql_page():
     st.title("📊 Analyze Your Data")
 
     st.subheader("Upload Data File")
-    file = st.file_uploader("Upload CSV / Excel")
+    file = st.file_uploader("Upload CSV / Excel", key="sql_uploader")
 
     if st.button("Upload Data"):
         if file:
             res = upload_file(file, st.session_state.token)
-            if res.status_code == 200:
-                st.success("File uploaded")
+            if res.status_code == 202:
+                st.success("File uploaded! Processing in background...")
             else:
                 st.error(res.text)
         else:
-            st.warning("Upload a file")
+            st.warning("Please select a file first")
 
     st.divider()
 

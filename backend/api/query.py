@@ -1,27 +1,25 @@
 from fastapi import APIRouter, HTTPException, Depends, status
 from backend.state.session_manager import get_active_file
 from backend.router.dispatcher import route_query
-from backend.modules.rag import rag_pipeline
+from backend.modules.rag.rag_pipeline import RAGPipeline
 from backend.modules.nl2sql import nl2sql_pipeline
 from backend.models.schemas import QueryRequest
 from backend.core.security import get_current_user
 import sqlite3
 from datetime import datetime
+import json
 
 router = APIRouter(prefix="/query", tags=["query"])
 
 
 # ========================
-# DATABASE CONNECTION
+# DATABASE
 # ========================
 def get_db():
     return sqlite3.connect("app.db")
 
 
 def init_db():
-    """
-    Initialize queries table
-    """
     conn = get_db()
     cursor = conn.cursor()
 
@@ -40,20 +38,25 @@ def init_db():
     conn.close()
 
 
-# Initialize once
 init_db()
 
 
-def log_query(user_id: int, query: str, response: str, route: str):
+def log_query(user_id: int, query: str, response: dict, route: str):
     """
-    Store query and response in database
+    Store query safely as JSON
     """
     conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute(
         "INSERT INTO queries (user_id, query, response, route, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (user_id, query, response, route, datetime.utcnow().isoformat())
+        (
+            user_id,
+            query,
+            json.dumps(response),
+            route,
+            datetime.utcnow().isoformat()
+        )
     )
 
     conn.commit()
@@ -66,11 +69,7 @@ def log_query(user_id: int, query: str, response: str, route: str):
 @router.post("/")
 def query(req: QueryRequest, user_id: int = Depends(get_current_user)):
     """
-    Process user query:
-    1. Get active file
-    2. Route query (dispatcher)
-    3. Execute module
-    4. Log result
+    Process user query with multi-file RAG support
     """
 
     try:
@@ -91,35 +90,52 @@ def query(req: QueryRequest, user_id: int = Depends(get_current_user)):
         if not state:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No active file uploaded"
+                detail="No files uploaded"
             )
 
-        file_type = state.get("file_type")
+        file_types = state.get("types", [])
+
+        if not file_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No valid file types found"
+            )
+
+        # ------------------------
+        # Decide primary type
+        # ------------------------
+        # If ANY structured → treat as SQL
+        if any(ft in ["csv", "xlsx", "db"] for ft in file_types):
+            primary_type = "csv"
+        else:
+            primary_type = "pdf"
 
         # ========================
         # ROUTING
         # ========================
-        route = route_query(file_type, req.query)
+        route = route_query(primary_type, req.query)
 
         # ========================
         # EXECUTION
         # ========================
         if route == "rag":
-            result = rag_pipeline(req.query)
+            pipeline = RAGPipeline(user_id)
+            result = pipeline.query(req.query)
 
         elif route == "nl2sql":
             result = nl2sql_pipeline(req.query)
 
         elif route == "rag_with_warning":
+            pipeline = RAGPipeline(user_id)
             result = {
                 "warning": "Data is unstructured. Numerical results may be approximate.",
-                "answer": rag_pipeline(req.query)
+                "answer": pipeline.query(req.query)
             }
 
         elif route == "hybrid":
-            # Future-ready (simple version)
+            pipeline = RAGPipeline(user_id)
             result = {
-                "rag": rag_pipeline(req.query),
+                "rag": pipeline.query(req.query),
                 "sql": nl2sql_pipeline(req.query)
             }
 
@@ -135,7 +151,7 @@ def query(req: QueryRequest, user_id: int = Depends(get_current_user)):
         log_query(
             user_id=user_id,
             query=req.query,
-            response=str(result),
+            response=result,
             route=route
         )
 

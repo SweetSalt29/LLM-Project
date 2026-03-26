@@ -1,70 +1,112 @@
-from fastapi import APIRouter, UploadFile, Depends, HTTPException, status
-from backend.modules.file_handler import save_file
-from backend.state.session_manager import set_active_file
+from fastapi import APIRouter, UploadFile, Depends, HTTPException, status, File, BackgroundTasks
+from typing import List
+from backend.modules.file_handler import save_files
+from backend.state.session_manager import set_active_file, update_active_file_status
 from backend.core.security import get_current_user
+from backend.modules.rag.rag_pipeline import RAGPipeline
+from backend.modules.rag.rag_loader import prepare_documents
 import os
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
-# Allowed file types (extend later)
 ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "csv", "xlsx", "msg", "chm"}
 
 
-@router.post("/")
-def upload_file(file: UploadFile, user_id: int = Depends(get_current_user)):
+# ========================
+# BACKGROUND INGESTION
+# ========================
+def run_ingestion(user_id: int, paths: List[str]):
     """
-    Upload a file and set it as active data source for the user.
+    Load, prepare and embed documents into FAISS for the user.
+    Runs in background to avoid frontend timeouts.
+    """
+    try:
+        pipeline = RAGPipeline(user_id)
+        pipeline.embedder.load_or_create()
 
-    Steps:
-    1. Validate file
-    2. Save file to disk
-    3. Update session state
-    4. Return metadata
+        for path in paths:
+            docs = pipeline.loader.load(path)
+            prepared = prepare_documents(docs)
+            pipeline.embedder.add_documents(prepared)
+
+        # Mark ingestion as done in session state
+        update_active_file_status(user_id, "ready")
+
+    except Exception as e:
+        # Mark ingestion as failed so query endpoint can warn user
+        update_active_file_status(user_id, f"failed: {str(e)}")
+
+
+# ========================
+# UPLOAD ENDPOINT
+# ========================
+@router.post("/", status_code=status.HTTP_202_ACCEPTED)
+async def upload_files(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    user_id: int = Depends(get_current_user)
+):
+    """
+    Upload one or more files. Validates extensions, saves to disk,
+    updates session state, then kicks off background RAG ingestion.
     """
     try:
         # ========================
-        # VALIDATION
+        # VALIDATE EXTENSIONS
         # ========================
-        if not file or not file.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No file provided"
-            )
+        validated_files = []
+        file_types = []
 
-        suffix = file.filename.split(".")[-1].lower()
-
-        if suffix not in ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unsupported file type: .{suffix}"
-            )
+        for file in files:
+            suffix = file.filename.split(".")[-1].lower()
+            if suffix not in ALLOWED_EXTENSIONS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported file type: .{suffix}"
+                )
+            validated_files.append(file)
+            file_types.append(suffix)
 
         # ========================
-        # SAVE FILE
+        # READ FILE BYTES (async)
+        # Must await here — UploadFile.read() is a coroutine.
+        # Skipping await returns empty bytes, producing 0-byte saved files.
         # ========================
-        file_path = save_file(file)
+        file_contents = []
+        for file in validated_files:
+            data = await file.read()
+            file_contents.append((file.filename, data))
+
+        # ========================
+        # SAVE FILES TO DISK
+        # ========================
+        file_paths = save_files(file_contents, user_id)
 
         # ========================
         # UPDATE SESSION STATE
         # ========================
-        set_active_file(user_id, file.filename, suffix)
+        set_active_file(user_id, {
+            "files": file_paths,
+            "types": file_types,
+            "status": "processing"
+        })
 
         # ========================
-        # RESPONSE
+        # BACKGROUND INGESTION
         # ========================
+        background_tasks.add_task(run_ingestion, user_id, file_paths)
+
         return {
-            "message": "File uploaded successfully",
-            "file_name": file.filename,
-            "file_type": suffix,
-            "path": file_path
+            "message": "Upload successful. Processing documents in background.",
+            "count": len(file_paths)
         }
 
     except HTTPException:
-        # Re-raise known HTTP errors
+        # Re-raise 400s cleanly — don't let them get swallowed by the 500 below
         raise
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"File upload failed: {str(e)}"
+            detail=f"Upload failed: {str(e)}"
         )
