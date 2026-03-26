@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, Depends, HTTPException, status, File, BackgroundTasks
 from typing import List
 from backend.modules.file_handler import save_files
-from backend.state.session_manager import set_active_file, update_active_file_status
+from backend.state.session_manager import set_active_file, update_active_file_status, get_active_file
 from backend.core.security import get_current_user
 from backend.modules.rag.rag_pipeline import RAGPipeline
 from backend.modules.rag.rag_loader import prepare_documents
@@ -29,7 +29,7 @@ def run_ingestion(user_id: int, paths: List[str]):
             prepared = prepare_documents(docs)
             pipeline.embedder.add_documents(prepared)
 
-        # Mark ingestion as done in session state
+        # Mark ingestion as done
         update_active_file_status(user_id, "ready")
 
     except Exception as e:
@@ -69,8 +69,8 @@ async def upload_files(
 
         # ========================
         # READ FILE BYTES (async)
-        # Must await here — UploadFile.read() is a coroutine.
-        # Skipping await returns empty bytes, producing 0-byte saved files.
+        # Must await — UploadFile.read() is a coroutine.
+        # Skipping await returns empty bytes → 0-byte saved files.
         # ========================
         file_contents = []
         for file in validated_files:
@@ -102,7 +102,6 @@ async def upload_files(
         }
 
     except HTTPException:
-        # Re-raise 400s cleanly — don't let them get swallowed by the 500 below
         raise
 
     except Exception as e:
@@ -110,3 +109,24 @@ async def upload_files(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Upload failed: {str(e)}"
         )
+
+
+# ========================
+# STATUS ENDPOINT
+# Polled by frontend to know when ingestion is complete
+# ========================
+@router.get("/status")
+def get_status(user_id: int = Depends(get_current_user)):
+    """
+    Returns current ingestion status for the user's uploaded files.
+    Possible values: 'processing' | 'ready' | 'failed: <reason>'
+    """
+    state = get_active_file(user_id)
+
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No files uploaded yet"
+        )
+
+    return {"status": state.get("status", "processing")}

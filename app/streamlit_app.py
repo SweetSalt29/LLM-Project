@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import time
 
 BASE_URL = "http://127.0.0.1:8000"
 
@@ -11,6 +12,10 @@ if "token" not in st.session_state:
 
 if "page" not in st.session_state:
     st.session_state.page = "login"
+
+if "doc_status" not in st.session_state:
+    st.session_state.doc_status = None  # None | "processing" | "ready" | "failed:..."
+
 
 # ========================
 # API CALLS
@@ -31,11 +36,13 @@ def upload_file(file, token):
     headers = {"Authorization": f"Bearer {token}"}
     return requests.post(
         f"{BASE_URL}/upload/",
-        # "files" must match the FastAPI parameter name exactly
-        # Tuple format: (filename, bytes, mimetype) so requests sets Content-Type correctly
         files={"files": (file.name, file.read())},
         headers=headers
     )
+
+def get_upload_status(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    return requests.get(f"{BASE_URL}/upload/status", headers=headers)
 
 def query_api(query, token):
     headers = {"Authorization": f"Bearer {token}"}
@@ -45,6 +52,7 @@ def query_api(query, token):
         headers=headers
     )
 
+
 # ========================
 # AUTH PAGE
 # ========================
@@ -53,10 +61,8 @@ def auth_page():
 
     tab1, tab2 = st.tabs(["Login", "Register"])
 
-    # -------- LOGIN --------
     with tab1:
         st.subheader("Login")
-
         name = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pass")
 
@@ -72,10 +78,8 @@ def auth_page():
             except:
                 st.error("Backend not running")
 
-    # -------- REGISTER --------
     with tab2:
         st.subheader("Register")
-
         name = st.text_input("Username", key="reg_user")
         password = st.text_input("Password", type="password", key="reg_pass")
 
@@ -88,6 +92,7 @@ def auth_page():
                     st.success("User registered")
                 else:
                     st.error(res.text)
+
 
 # ========================
 # HOME PAGE
@@ -115,7 +120,6 @@ Choose a mode below to get started.
     with tab1:
         st.subheader("Document Intelligence")
         st.write("Ask questions, summarize, and explore your documents.")
-
         if st.button("Go to Document Chat"):
             st.session_state.page = "rag"
             st.rerun()
@@ -123,7 +127,6 @@ Choose a mode below to get started.
     with tab2:
         st.subheader("Data Analysis")
         st.write("Get insights, calculations, and trends from your data.")
-
         if st.button("Go to Data Analysis"):
             st.session_state.page = "sql"
             st.rerun()
@@ -134,6 +137,33 @@ Choose a mode below to get started.
         st.session_state.token = None
         st.session_state.page = "login"
         st.rerun()
+
+
+# ========================
+# STATUS BANNER
+# Shows processing / ready / failed state clearly
+# ========================
+def show_status_banner():
+    s = st.session_state.doc_status
+
+    if s == "processing":
+        st.warning("⏳ Document is still being processed. Please wait before querying.")
+
+        # Poll backend every 3 seconds until ready
+        with st.spinner("Processing..."):
+            time.sleep(3)
+            res = get_upload_status(st.session_state.token)
+            if res.status_code == 200:
+                new_status = res.json().get("status")
+                st.session_state.doc_status = new_status
+                st.rerun()
+
+    elif s == "ready":
+        st.success("✅ Document ready. You can now ask questions.")
+
+    elif s and s.startswith("failed"):
+        st.error(f"❌ Ingestion failed: {s}. Please re-upload your file.")
+
 
 # ========================
 # RAG PAGE
@@ -148,37 +178,47 @@ def rag_page():
         if file:
             res = upload_file(file, st.session_state.token)
             if res.status_code == 202:
+                st.session_state.doc_status = "processing"
                 st.success("File uploaded! Processing in background...")
+                st.rerun()
             else:
                 st.error(res.text)
         else:
             st.warning("Please select a file first")
 
+    # Always show current status
+    show_status_banner()
+
     st.divider()
 
-    st.subheader("💬 Chat with Document")
+    # Only show chat if ready
+    if st.session_state.doc_status == "ready":
+        st.subheader("💬 Chat with Document")
 
-    query = st.text_input("Ask a question")
+        query = st.text_input("Ask a question")
 
-    if st.button("Ask"):
-        if query:
-            res = query_api(query, st.session_state.token)
+        if st.button("Ask"):
+            if query:
+                res = query_api(query, st.session_state.token)
+                if res.status_code == 200:
+                    data = res.json()
+                    st.write("### Answer")
+                    st.write(data["response"])
+                else:
+                    st.error(res.json().get("detail", res.text))
+
+        if st.button("Summarize Document"):
+            res = query_api("summarize the document", st.session_state.token)
             if res.status_code == 200:
-                data = res.json()
-                st.write("### Answer")
-                st.write(data["response"])
+                st.write("### Summary")
+                st.write(res.json()["response"])
             else:
-                st.error(res.text)
-
-    if st.button("Summarize Document"):
-        res = query_api("summarize the document", st.session_state.token)
-        if res.status_code == 200:
-            st.write("### Summary")
-            st.write(res.json()["response"])
+                st.error(res.json().get("detail", res.text))
 
     if st.button("⬅ Back"):
         st.session_state.page = "home"
         st.rerun()
+
 
 # ========================
 # NL2SQL PAGE
@@ -193,31 +233,37 @@ def sql_page():
         if file:
             res = upload_file(file, st.session_state.token)
             if res.status_code == 202:
+                st.session_state.doc_status = "processing"
                 st.success("File uploaded! Processing in background...")
+                st.rerun()
             else:
                 st.error(res.text)
         else:
             st.warning("Please select a file first")
 
+    show_status_banner()
+
     st.divider()
 
-    st.subheader("📈 Ask Data Questions")
+    if st.session_state.doc_status == "ready":
+        st.subheader("📈 Ask Data Questions")
 
-    query = st.text_input("e.g. total sales, average price")
+        query = st.text_input("e.g. total sales, average price")
 
-    if st.button("Analyze"):
-        if query:
-            res = query_api(query, st.session_state.token)
-            if res.status_code == 200:
-                data = res.json()
-                st.write("### Result")
-                st.write(data["response"])
-            else:
-                st.error(res.text)
+        if st.button("Analyze"):
+            if query:
+                res = query_api(query, st.session_state.token)
+                if res.status_code == 200:
+                    data = res.json()
+                    st.write("### Result")
+                    st.write(data["response"])
+                else:
+                    st.error(res.json().get("detail", res.text))
 
     if st.button("⬅ Back"):
         st.session_state.page = "home"
         st.rerun()
+
 
 # ========================
 # ROUTER

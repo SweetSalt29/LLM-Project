@@ -93,6 +93,27 @@ def query(req: QueryRequest, user_id: int = Depends(get_current_user)):
                 detail="No files uploaded"
             )
 
+        # ========================
+        # CHECK INGESTION STATUS
+        # Block query if background ingestion isn't done yet
+        # ========================
+        ingestion_status = state.get("status", "processing")
+
+        if ingestion_status == "processing":
+            raise HTTPException(
+                status_code=status.HTTP_202_ACCEPTED,
+                detail="Documents are still being processed. Please wait a moment and try again."
+            )
+
+        if ingestion_status.startswith("failed"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Document ingestion failed: {ingestion_status}. Please re-upload your file."
+            )
+
+        # ========================
+        # FILE TYPE ROUTING
+        # ========================
         file_types = state.get("types", [])
 
         if not file_types:
@@ -101,10 +122,6 @@ def query(req: QueryRequest, user_id: int = Depends(get_current_user)):
                 detail="No valid file types found"
             )
 
-        # ------------------------
-        # Decide primary type
-        # ------------------------
-        # If ANY structured → treat as SQL
         if any(ft in ["csv", "xlsx", "db"] for ft in file_types):
             primary_type = "csv"
         else:
