@@ -1,42 +1,74 @@
-llm_venv/
-# --- Python & Environment ---
+# ========================
+# Python
+# ========================
 __pycache__/
 *.py[cod]
-*$py.class
-.env
-.venv
-env/
-venv/
-ENV/
+*.pyo
+*.pyd
 
-# --- IDE & OS ---
-.vscode/
-.idea/
+# ========================
+# Virtual Environment
+# ========================
+llm_venv/
+.venv/
+
+# ========================
+# Environment Variables
+# ========================
+.env
+
+# ========================
+# SQLite DB
+# ========================
+*.db
+*.sqlite3
+
+# ========================
+# Logs
+# ========================
+*.log
+
+# ========================
+# Data Files (uploads, samples)
+# ========================
+data/uploads/
+data/temp/
+data/processed/
+
+# Optional: ignore all data
+# data/
+
+# ========================
+# Jupyter
+# ========================
+.ipynb_checkpoints/
+
+# ========================
+# OS Files
+# ========================
 .DS_Store
 Thumbs.db
 
-# --- AI & Data Silo
-db/
-chroma_db/
-vector_store/
+# ========================
+# VS Code / IDE
+# ========================
+.vscode/
+.idea/
 
-# Don't track extracted images or uploaded user data
-extracted_images/
-uploads/
-temp_*/
+# ========================
+# Streamlit Cache
+# ========================
+.streamlit/
 
-# Don't track local SQLite databases created by your NL2SQL module
-*.db
-*.sqlite
-*.sqlite3
-
-# --- Models & Cache ---
-# If you download local LLMs (e.g., via HuggingFace or Ollama)
-models/
-.cache/
-huggingface/
-
-# --- Distribution / Build ---
+# ========================
+# Build / Distribution
+# ========================
 dist/
 build/
 *.egg-info/
+
+# ========================
+# Temporary Files
+# ========================
+*.tmp
+*.swp
