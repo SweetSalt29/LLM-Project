@@ -1,1 +1,42 @@
 llm_venv/
+# --- Python & Environment ---
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+
+# --- IDE & OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- AI & Data Silo
+db/
+chroma_db/
+vector_store/
+
+# Don't track extracted images or uploaded user data
+extracted_images/
+uploads/
+temp_*/
+
+# Don't track local SQLite databases created by your NL2SQL module
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Models & Cache ---
+# If you download local LLMs (e.g., via HuggingFace or Ollama)
+models/
+.cache/
+huggingface/
+
+# --- Distribution / Build ---
+dist/
+build/
+*.egg-info/
