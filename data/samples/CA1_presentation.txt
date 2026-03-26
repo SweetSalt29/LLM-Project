@@ -1,0 +1,73 @@
+Symbiosis Institute of Technology, Nagpur Campus (SIT-N)
+Department of Computer Science and Engineering
+CA1: Technology and Domain Identification
+of  Industry Internship
+Session: 2025-26
+         Presented By:
+Name: Aaryan Tamhane
+PRN: 22070521127
+
+   Industry Mentor: 
+Mr. Prathamesh Kashelikar
+Institute Mentor: 
+Dr. Nikhil Manglurkar
+
+
+Name: Mr. Prathamesh Kashelikar
+
+Designation: Senior Lead Engineer - Data Engineer
+
+Department: Delivery and Practices (Artificial Intelligence)
+
+Contact: +91 8483082289
+
+Mail: prathamesh.kashelikar@konverge.ai
+Contact details of Mentor
+
+Konverge AI is a decision-science and AI engineering firm dedicated to empowering businesses with Artificial Intelligence (AI) and Machine Learning (ML) solutions. It builds scalable AI products and provides end-to-end support to integrate these solutions with existing systems, helping organizations unlock strategic value from data and automation. 
+
+Founders:
+ • Prateek Chandrayan — Co-Founder & CEO
+ • Ketan Paithankar — Co-Founder & CTO
+ • Sagar Ghonge — Co-Founder & COO 
+
+What the Company Does:
+ • Provides AI & data engineering services
+ • Builds AI-powered products & solutions
+ • Offers AI consulting, generative AI, cloud & data engineering, analytics, and     product engineering support
+ • Helps enterprises implement intelligent systems for automation and decision-making 
+
+
+Organization Information
+
+During the first month of the internship at Konverge, the work assigned focused on building strong programming fundamentals, understanding AI systems, and gaining exposure to production-level and cloud-based AI technologies.
+Work Assigned
+• Python programming (fundamentals, OOP, modular & production-grade code)• Data analysis using Pandas and NumPy• Data visualization using Matplotlib and Seaborn• Research on AI concepts (LLMs, prompt engineering, model quantization)• Comparative study of cloud platforms (AWS vs Azure)• Study of serverless and AI cloud services (AWS Lambda, Amazon Bedrock)• Implementation of RAG (Retrieval Augmented Generation) mini-projects• Hands-on with AI frameworks (LangChain, LangGraph)• Testing open-source AI models on limited hardware• Relating technical tasks to real-world business use cases
+
+Work Assigned/ Technologies Working on
+
+Project Internship Activity Planning
+• First Phase (Initial 3 Months):   – Learning Python programming and software engineering best practices   – Understanding AI fundamentals, LLMs, and prompt engineering   – Hands-on practice with data analysis, visualization, and AI frameworks   – Research on cloud platforms (AWS & Azure) and AI architectures
+• Second Phase (Later 3 Months):   – Working on AI-based mini-projects and system implementations   – Exposure to real-world business use cases and client requirements   – Applying learned concepts in production and deployment scenarios   – Hands-on experience with client-level projects
+
+Project Internship Activity Planning
+
+Project Internship Progress
+Project Internship Progress (First 4 Weeks)
+The internship diary presents a concise, day-wise record of tasks performed, learning outcomes, and progress achieved throughout the internship period.
+• Completed onboarding and understood organizational workflow• Strengthened Python fundamentals, OOP concepts, and modular coding   practices• Gained hands-on experience with data analysis using Pandas and NumPy• Learned data visualization using Matplotlib and Seaborn• Studied AI concepts including LLMs, prompt engineering, and model quantization• Worked on RAG (Retrieval Augmented Generation) mini-projects• Gained exposure to AI frameworks such as LangChain and LangGraph• Explored cloud platforms (AWS & Azure) and AI deployment concepts• Applied technical learning to real-world business use cases
+
+
+Attendance / Photos of Industry 
+Photos:
+Main office front desk
+Personal Konverge.Ai ID card
+My work desk
+
+Proofs of stipend: 
+Stipend for the duration of 22nd December 2025 to 31st December 2025
+
+
+Stipend & More
+
+ Thank You…..
