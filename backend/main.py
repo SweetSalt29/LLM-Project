@@ -10,4 +10,4 @@ app.include_router(query.router)
 
 @app.get("/")
 def home():
-    return {"message": "System running"}
+    return {"message": "Welcome to Document and Data Analyzer!"}

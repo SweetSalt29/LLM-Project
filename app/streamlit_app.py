@@ -2,6 +2,66 @@ import streamlit as st
 import requests
 import time
 
+def set_dynamic_background():
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: linear-gradient(
+                270deg,
+                #ff7f00,
+                #001f3f,
+                #ff7f00,
+                #001f3f
+            );
+            background-size: 400% 400%;
+            animation: gradientFlow 12s ease infinite;
+        }
+
+        @keyframes gradientFlow {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        /* TEXT */
+        h1, h2, h3, h4, h5, h6, p, div, label {
+            color: white !important;
+        }
+
+        /* BUTTONS */
+        .stButton > button {
+            background-color: white !important;
+            color: black !important;
+            border-radius: 10px;
+            border: none;
+        }
+
+        .stButton > button * {
+            color: black !important;
+        }
+
+        /* INPUT */
+        .stTextInput input {
+            background-color: white !important;
+            color: black !important;
+            caret-color: black !important;
+        }
+
+        textarea {
+            color: black !important;
+            caret-color: black !important;
+        }
+
+        input::placeholder {
+            color: #555 !important;
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
 BASE_URL = "http://127.0.0.1:8000"
 
 # ========================
@@ -268,6 +328,8 @@ def sql_page():
 # ========================
 # ROUTER
 # ========================
+set_dynamic_background()
+
 if not st.session_state.token:
     auth_page()
 else:
