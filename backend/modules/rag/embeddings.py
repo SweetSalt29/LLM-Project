@@ -8,7 +8,7 @@ from langchain_community.vectorstores import FAISS
 class EmbeddingManager:
     def __init__(self, user_id: int):
         self.user_id = user_id
-        self.index_path = f"faiss_index/user_{user_id}"
+        self.index_path = f"backend/modules/rag/faiss_index/user_{user_id}"
 
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-mpnet-base-v2"

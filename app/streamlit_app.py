@@ -2,6 +2,9 @@ import streamlit as st
 import requests
 import time
 
+# ========================
+# BACKGROUND STYLE
+# ========================
 def set_dynamic_background():
     st.markdown(
         """
@@ -62,6 +65,7 @@ def set_dynamic_background():
         unsafe_allow_html=True
     )
 
+
 BASE_URL = "http://127.0.0.1:8000"
 
 # ========================
@@ -121,23 +125,33 @@ def auth_page():
 
     tab1, tab2 = st.tabs(["Login", "Register"])
 
+    # -------- LOGIN --------
     with tab1:
         st.subheader("Login")
         name = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pass")
 
         if st.button("Login"):
-            try:
-                res = login(name, password)
-                if res.status_code == 200:
-                    st.session_state.token = res.json()["access_token"]
-                    st.session_state.page = "home"
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials")
-            except:
-                st.error("Backend not running")
+            # Guard: don't hit backend with empty fields
+            if not name or not password:
+                st.warning("Please enter username and password")
+            else:
+                try:
+                    res = login(name, password)
+                    if res.status_code == 200:
+                        st.session_state.token = res.json()["access_token"]
+                        st.session_state.page = "home"
+                        st.rerun()
+                    else:
+                        # Show actual backend error, not a hardcoded string
+                        detail = res.json().get("detail", "Invalid credentials")
+                        st.error(detail)
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot connect to backend. Is it running?")
+                except Exception as e:
+                    st.error(f"Unexpected error: {str(e)}")
 
+    # -------- REGISTER --------
     with tab2:
         st.subheader("Register")
         name = st.text_input("Username", key="reg_user")
@@ -246,12 +260,12 @@ def rag_page():
         else:
             st.warning("Please select a file first")
 
-    # Always show current status
+    # Always show current ingestion status
     show_status_banner()
 
     st.divider()
 
-    # Only show chat if ready
+    # Only show chat UI once document is ready
     if st.session_state.doc_status == "ready":
         st.subheader("💬 Chat with Document")
 
@@ -315,8 +329,27 @@ def sql_page():
                 res = query_api(query, st.session_state.token)
                 if res.status_code == 200:
                     data = res.json()
-                    st.write("### Result")
-                    st.write(data["response"])
+                    result = data.get("response", {})
+
+                    # Pipeline returned an error (guardrail block, bad SQL, etc.)
+                    if result.get("error"):
+                        st.error(f"❌ {result['error']}")
+                    else:
+                        # 1. User query
+                        st.markdown("### 🙋 User Query")
+                        st.info(result.get("user_query", query))
+
+                        # 2. Generated SQL
+                        st.markdown("### 🔍 Generated SQL Query")
+                        st.code(result.get("sql_query", ""), language="sql")
+
+                        # 3. Natural language answer
+                        st.markdown("### 💬 Answer")
+                        st.success(result.get("natural_answer", ""))
+
+                        # 4. Raw result as markdown table
+                        st.markdown("### 📋 Data Result")
+                        st.markdown(result.get("result_markdown", "_No results._"))
                 else:
                     st.error(res.json().get("detail", res.text))
 

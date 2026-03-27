@@ -3,6 +3,7 @@ from backend.state.session_manager import get_active_file
 from backend.router.dispatcher import route_query
 from backend.modules.rag.rag_pipeline import RAGPipeline
 from backend.modules.nl2sql import nl2sql_pipeline
+import uuid
 from backend.models.schemas import QueryRequest
 from backend.core.security import get_current_user
 import sqlite3
@@ -140,7 +141,14 @@ def query(req: QueryRequest, user_id: int = Depends(get_current_user)):
             result = pipeline.query(req.query)
 
         elif route == "nl2sql":
-            result = nl2sql_pipeline(req.query)
+            file_paths = state.get("files", [])
+            session_id = str(uuid.uuid4())
+            result = nl2sql_pipeline(
+                user_query=req.query,
+                user_id=user_id,
+                file_paths=file_paths,
+                session_id=session_id
+            )
 
         elif route == "rag_with_warning":
             pipeline = RAGPipeline(user_id)
@@ -151,9 +159,16 @@ def query(req: QueryRequest, user_id: int = Depends(get_current_user)):
 
         elif route == "hybrid":
             pipeline = RAGPipeline(user_id)
+            file_paths = state.get("files", [])
+            session_id = str(uuid.uuid4())
             result = {
                 "rag": pipeline.query(req.query),
-                "sql": nl2sql_pipeline(req.query)
+                "sql": nl2sql_pipeline(
+                    user_query=req.query,
+                    user_id=user_id,
+                    file_paths=file_paths,
+                    session_id=session_id
+                )
             }
 
         else:
