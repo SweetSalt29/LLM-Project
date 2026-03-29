@@ -9,16 +9,28 @@ import os
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
-ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "csv", "xlsx", "msg", "chm"}
+# ========================
+# PIPELINE-AWARE EXTENSION SETS
+# ========================
+RAG_EXTENSIONS  = {"pdf", "doc", "docx", "txt"}
+SQL_EXTENSIONS  = {"csv", "xlsx", "xls", "db", "sql"}
+ALL_EXTENSIONS  = RAG_EXTENSIONS | SQL_EXTENSIONS
+
+def get_pipeline(suffix: str) -> str:
+    """Return 'rag' or 'sql' based on file extension."""
+    if suffix in RAG_EXTENSIONS:
+        return "rag"
+    return "sql"
 
 
 # ========================
-# BACKGROUND INGESTION
+# BACKGROUND INGESTION (RAG only)
+# SQL files are loaded at query time — no embedding needed.
 # ========================
 def run_ingestion(user_id: int, paths: List[str]):
     """
-    Load, prepare and embed documents into FAISS for the user.
-    Runs in background to avoid frontend timeouts.
+    Embed RAG documents into FAISS for the user.
+    Only called for RAG-type files.
     """
     try:
         pipeline = RAGPipeline(user_id)
@@ -29,11 +41,9 @@ def run_ingestion(user_id: int, paths: List[str]):
             prepared = prepare_documents(docs)
             pipeline.embedder.add_documents(prepared)
 
-        # Mark ingestion as done
         update_active_file_status(user_id, "ready")
 
     except Exception as e:
-        # Mark ingestion as failed so query endpoint can warn user
         update_active_file_status(user_id, f"failed: {str(e)}")
 
 
@@ -47,34 +57,73 @@ async def upload_files(
     user_id: int = Depends(get_current_user)
 ):
     """
-    Upload one or more files. Validates extensions, saves to disk,
-    updates session state, then kicks off background RAG ingestion.
+    Upload one or more files.
+
+    Accepted types:
+    - RAG  : pdf, doc, docx, txt
+    - NL2SQL: csv, xlsx, xls, db, sql
+
+    Mixing RAG and SQL files in a single upload is not allowed —
+    each upload should be one pipeline type.
     """
     try:
         # ========================
         # VALIDATE EXTENSIONS
         # ========================
         validated_files = []
-        file_types = []
+        file_types      = []
+        pipeline_types  = set()
 
         for file in files:
-            suffix = file.filename.split(".")[-1].lower()
-            if suffix not in ALLOWED_EXTENSIONS:
+            if not file.filename:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unsupported file type: .{suffix}"
+                    detail="One or more files has no filename."
                 )
+
+            suffix = file.filename.rsplit(".", 1)[-1].lower()
+
+            if suffix not in ALL_EXTENSIONS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Unsupported file type: .{suffix}. "
+                        f"Accepted for documents: {', '.join(sorted(RAG_EXTENSIONS))}. "
+                        f"Accepted for data: {', '.join(sorted(SQL_EXTENSIONS))}."
+                    )
+                )
+
+            pipeline_types.add(get_pipeline(suffix))
             validated_files.append(file)
             file_types.append(suffix)
 
         # ========================
+        # BLOCK MIXED UPLOADS
+        # RAG + SQL files in one batch makes routing ambiguous
+        # ========================
+        if len(pipeline_types) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Mixed upload not allowed. "
+                    "Please upload document files (pdf, doc, docx, txt) "
+                    "and data files (csv, xlsx, xls, db, sql) separately."
+                )
+            )
+
+        primary_pipeline = pipeline_types.pop()  # "rag" or "sql"
+
+        # ========================
         # READ FILE BYTES (async)
-        # Must await — UploadFile.read() is a coroutine.
-        # Skipping await returns empty bytes → 0-byte saved files.
         # ========================
         file_contents = []
         for file in validated_files:
             data = await file.read()
+            if not data:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File '{file.filename}' is empty."
+                )
             file_contents.append((file.filename, data))
 
         # ========================
@@ -86,19 +135,26 @@ async def upload_files(
         # UPDATE SESSION STATE
         # ========================
         set_active_file(user_id, {
-            "files": file_paths,
-            "types": file_types,
-            "status": "processing"
+            "files":    file_paths,
+            "types":    file_types,
+            "pipeline": primary_pipeline,   # "rag" or "sql"
+            "status":   "processing" if primary_pipeline == "rag" else "ready"
+            # SQL files need no background processing — they're ready immediately
         })
 
         # ========================
-        # BACKGROUND INGESTION
+        # BACKGROUND INGESTION (RAG only)
         # ========================
-        background_tasks.add_task(run_ingestion, user_id, file_paths)
+        if primary_pipeline == "rag":
+            background_tasks.add_task(run_ingestion, user_id, file_paths)
+            message = "Upload successful. Embedding documents in background."
+        else:
+            message = "Upload successful. Data file is ready to query."
 
         return {
-            "message": "Upload successful. Processing documents in background.",
-            "count": len(file_paths)
+            "message":  message,
+            "pipeline": primary_pipeline,
+            "count":    len(file_paths)
         }
 
     except HTTPException:
@@ -113,13 +169,13 @@ async def upload_files(
 
 # ========================
 # STATUS ENDPOINT
-# Polled by frontend to know when ingestion is complete
 # ========================
 @router.get("/status")
 def get_status(user_id: int = Depends(get_current_user)):
     """
-    Returns current ingestion status for the user's uploaded files.
-    Possible values: 'processing' | 'ready' | 'failed: <reason>'
+    Returns current ingestion status.
+    SQL files are always 'ready' immediately after upload.
+    RAG files are 'processing' until embedding completes.
     """
     state = get_active_file(user_id)
 
@@ -129,4 +185,7 @@ def get_status(user_id: int = Depends(get_current_user)):
             detail="No files uploaded yet"
         )
 
-    return {"status": state.get("status", "processing")}
+    return {
+        "status":   state.get("status", "processing"),
+        "pipeline": state.get("pipeline", "rag")
+    }

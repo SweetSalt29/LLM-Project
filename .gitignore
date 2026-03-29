@@ -31,6 +31,7 @@ llm_venv/
 # ========================
 # Data Files (uploads, samples)
 # ========================
+data/
 data/uploads/
 data/temp/
 data/processed/

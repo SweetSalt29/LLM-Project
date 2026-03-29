@@ -63,24 +63,16 @@ FORBIDDEN_KEYWORDS = [
 ]
 
 def is_safe_sql(sql: str) -> tuple[bool, str]:
-    """
-    Returns (is_safe, reason).
-    Blocks anything that isn't a pure SELECT statement.
-    """
     cleaned = sql.strip().upper()
 
-    # Must start with SELECT
     if not cleaned.startswith("SELECT"):
         return False, "Only SELECT queries are allowed. Write operations are blocked."
 
-    # Block forbidden keywords anywhere in the query
     for keyword in FORBIDDEN_KEYWORDS:
-        # Word boundary check to avoid matching e.g. "SELECTED"
         pattern = rf"\b{keyword}\b"
         if re.search(pattern, cleaned):
             return False, f"Query contains forbidden keyword: {keyword}"
 
-    # Block SQL comments (used to bypass filters)
     if "--" in sql or "/*" in sql:
         return False, "SQL comments are not allowed."
 
@@ -88,13 +80,43 @@ def is_safe_sql(sql: str) -> tuple[bool, str]:
 
 
 # ============================================================
+# COLUMN NAME SANITIZER
+# Renames columns with spaces/special chars so SQLite handles
+# them cleanly, and keeps a mapping back to original names.
+# ============================================================
+def sanitize_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Replace spaces and special characters in column names with underscores.
+    Returns sanitized DataFrame and a mapping {new_name: original_name}.
+    """
+    mapping = {}
+    new_columns = []
+
+    for col in df.columns:
+        new_col = re.sub(r"[^a-zA-Z0-9]", "_", str(col)).strip("_")
+        # Handle duplicates after sanitization
+        base = new_col
+        count = 1
+        while new_col in mapping:
+            new_col = f"{base}_{count}"
+            count += 1
+        mapping[new_col] = col
+        new_columns.append(new_col)
+
+    df = df.copy()
+    df.columns = new_columns
+    return df, mapping
+
+
+# ============================================================
 # FILE LOADER — load CSV/Excel into in-memory SQLite
 # ============================================================
 def load_files_to_sqlite(file_paths: list[str]) -> tuple[sqlite3.Connection, dict]:
     """
-    Load each CSV/Excel file into an in-memory SQLite DB.
+    Load each file into an in-memory SQLite DB.
+    Columns are sanitized so SQLite never sees spaces or slashes.
     Returns (connection, schema_info) where schema_info maps
-    table_name -> list of column names.
+    table_name -> list of sanitized column names.
     """
     conn = sqlite3.connect(":memory:")
     schema_info = {}
@@ -102,7 +124,6 @@ def load_files_to_sqlite(file_paths: list[str]) -> tuple[sqlite3.Connection, dic
     for path in file_paths:
         suffix = Path(path).suffix.lower()
         table_name = Path(path).stem.lower()
-        # Sanitize table name — remove non-alphanumeric chars
         table_name = re.sub(r"[^a-z0-9_]", "_", table_name)
 
         if suffix == ".csv":
@@ -110,36 +131,54 @@ def load_files_to_sqlite(file_paths: list[str]) -> tuple[sqlite3.Connection, dic
         elif suffix in [".xlsx", ".xls"]:
             df = pd.read_excel(path)
         else:
-            continue  # skip unsupported files silently
+            continue  # skip unsupported silently
+
+        # Sanitize column names before loading into SQLite
+        df, col_mapping = sanitize_columns(df)
 
         df.to_sql(table_name, conn, index=False, if_exists="replace")
+
+        # Store sanitized column names in schema (what LLM must use)
         schema_info[table_name] = list(df.columns)
 
     return conn, schema_info
 
 
 # ============================================================
-# SCHEMA BUILDER — format schema for LLM prompt
+# SCHEMA BUILDER
+# Shows exact column names the LLM must use, with a sample row
 # ============================================================
-def build_schema_string(schema_info: dict) -> str:
+def build_schema_string(schema_info: dict, conn: sqlite3.Connection) -> str:
     """
-    Format schema dict as readable text for the LLM.
-    Example:
-        Table: sales
-        Columns: product, quantity, price, date
+    Build a detailed schema string with column names and a sample
+    data row so the LLM understands actual values and data types.
     """
     lines = []
     for table, columns in schema_info.items():
-        lines.append(f"Table: {table}")
-        lines.append(f"Columns: {', '.join(columns)}")
+        lines.append(f"Table: `{table}`")
+        lines.append("Columns (use these EXACT names in your SQL query):")
+        for col in columns:
+            lines.append(f"  - `{col}`")
+
+        # Add one sample row so LLM understands data format
+        try:
+            sample_df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 1", conn)
+            if not sample_df.empty:
+                lines.append("Sample row:")
+                for col in columns:
+                    lines.append(f"  {col}: {sample_df[col].iloc[0]}")
+        except Exception:
+            pass
+
         lines.append("")
+
     return "\n".join(lines)
 
 
 # ============================================================
-# LLM CALLS
+# LLM CALL
 # ============================================================
-def call_llm(prompt: str) -> str:
+def call_llm(messages: list) -> str:
     response = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={
@@ -148,62 +187,110 @@ def call_llm(prompt: str) -> str:
         },
         json={
             "model": MODEL,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": messages
         }
     )
     data = response.json()
     return data["choices"][0]["message"]["content"].strip()
 
 
-def generate_sql(user_query: str, schema_string: str) -> str:
-    """
-    Ask LLM to generate a SQL SELECT query from the schema + question.
-    """
-    prompt = f"""You are an expert SQL assistant.
+# ============================================================
+# SQL GENERATION — with conversation history for context
+# ============================================================
+def generate_sql(user_query: str, schema_string: str, history: list) -> str:
+    history_text = ""
+    if history:
+        recent = history[-12:]
+        history_text = "\n".join([
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in recent
+        ])
 
-You are given the following database schema:
-{schema_string}
+    prompt_text = (
+        f"You are an expert SQLite assistant.\n\n"
+        f"Database schema:\n{schema_string}\n"
+    )
 
-The user asks:
-"{user_query}"
+    if history_text:
+        prompt_text += f"\nConversation so far:\n{history_text}\n"
 
-Rules:
-- Write ONLY a valid SQLite SELECT query.
-- Do NOT use INSERT, UPDATE, DELETE, DROP, ALTER, or any write operations.
-- Do NOT include markdown formatting, code blocks, or any explanation.
-- Output ONLY the raw SQL query and nothing else.
+    prompt_text += (
+        f"\nUser now asks: \"{user_query}\"\n\n"
+        "Rules:\n"
+        "- Write ONLY a valid SQLite SELECT query.\n"
+        "- Use the EXACT column names listed in the schema above — do not guess or rename them.\n"
+        "- Column names are already sanitized (no spaces or special characters).\n"
+        "- Do NOT use INSERT, UPDATE, DELETE, DROP, ALTER, or any write operations.\n"
+        "- Do NOT include markdown, code blocks, backtick fences, or any explanation.\n"
+        "- Use conversation history to resolve references like 'that column', 'same filter'.\n"
+        "- Output ONLY the raw SQL query and nothing else.\n\n"
+        "SQL Query:"
+    )
 
-SQL Query:"""
+    raw = call_llm([{"role": "user", "content": prompt_text}])
 
-    raw = call_llm(prompt)
-
-    # Strip any accidental markdown code fences the LLM might add
+    # Strip any accidental markdown fences
     raw = re.sub(r"```(?:sql)?", "", raw, flags=re.IGNORECASE).strip().rstrip("```").strip()
     return raw
 
 
-def generate_natural_answer(user_query: str, sql_query: str, result_markdown: str) -> str:
-    """
-    Ask LLM to convert raw query results into a friendly natural language answer.
-    """
-    prompt = f"""You are a helpful data analyst assistant.
+# ============================================================
+# NATURAL LANGUAGE ANSWER
+# ============================================================
+def generate_natural_answer(
+    user_query: str,
+    sql_query: str,
+    result_markdown: str,
+    history: list
+) -> str:
+    history_text = ""
+    if history:
+        recent = history[-12:]
+        history_text = "\n".join([
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in recent
+        ])
 
-The user asked: "{user_query}"
+    prompt_text = "You are a helpful data analyst assistant.\n\n"
 
-The SQL query run was:
-{sql_query}
+    if history_text:
+        prompt_text += f"Conversation so far:\n{history_text}\n\n"
 
-The result of the query is:
-{result_markdown}
+    prompt_text += (
+        f"The user asked: \"{user_query}\"\n"
+        f"SQL run: {sql_query}\n"
+        f"Result:\n{result_markdown}\n\n"
+        "Write a clear, concise, friendly natural language answer. "
+        "Reference prior conversation context if relevant. "
+        "Do not repeat the SQL query."
+    )
 
-Write a clear, concise, friendly natural language answer summarizing the result.
-Do not repeat the SQL query. Just answer the user's question directly."""
-
-    return call_llm(prompt)
+    return call_llm([{"role": "user", "content": prompt_text}])
 
 
 # ============================================================
-# RESULT FORMATTER — DataFrame → Markdown table
+# CONVERSATION SUMMARIZER
+# ============================================================
+def summarize_conversation(history: list) -> str:
+    if not history:
+        return "No conversation to summarize yet."
+
+    history_text = "\n".join([
+        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+        for m in history
+    ])
+
+    prompt_text = (
+        "Summarize the following data analysis conversation. "
+        "Highlight: key questions asked, SQL queries run, and important findings.\n\n"
+        f"Conversation:\n{history_text}\n\nSummary:"
+    )
+
+    return call_llm([{"role": "user", "content": prompt_text}])
+
+
+# ============================================================
+# RESULT FORMATTER
 # ============================================================
 def dataframe_to_markdown(df: pd.DataFrame) -> str:
     if df.empty:
@@ -218,26 +305,15 @@ def nl2sql_pipeline(
     user_query: str,
     user_id: int,
     file_paths: list[str],
-    session_id: str = None
+    session_id: str = None,
+    history: list = None
 ) -> dict:
-    """
-    Full NL2SQL pipeline.
-
-    Returns:
-    {
-        "user_query": str,
-        "sql_query": str,
-        "natural_answer": str,
-        "result_markdown": str,
-        "error": str | None
-    }
-    """
     if session_id is None:
         session_id = str(uuid.uuid4())
+    if history is None:
+        history = []
 
-    # ----------------------
-    # 1. Load files into SQLite
-    # ----------------------
+    # 1. Load files (columns sanitized inside)
     try:
         conn, schema_info = load_files_to_sqlite(file_paths)
     except Exception as e:
@@ -246,26 +322,21 @@ def nl2sql_pipeline(
     if not schema_info:
         return _error_response(user_query, "No valid CSV or Excel files found to query.")
 
-    schema_string = build_schema_string(schema_info)
+    # 2. Build schema string (passes conn for sample rows)
+    schema_string = build_schema_string(schema_info, conn)
 
-    # ----------------------
-    # 2. Generate SQL via LLM
-    # ----------------------
+    # 3. Generate SQL
     try:
-        sql_query = generate_sql(user_query, schema_string)
+        sql_query = generate_sql(user_query, schema_string, history)
     except Exception as e:
         return _error_response(user_query, f"Failed to generate SQL: {str(e)}")
 
-    # ----------------------
-    # 3. Guardrail check
-    # ----------------------
+    # 4. Guardrail check
     is_safe, reason = is_safe_sql(sql_query)
     if not is_safe:
         return _error_response(user_query, f"Unsafe query blocked: {reason}", sql_query)
 
-    # ----------------------
-    # 4. Execute SQL
-    # ----------------------
+    # 5. Execute SQL
     try:
         result_df = pd.read_sql_query(sql_query, conn)
     except Exception as e:
@@ -275,17 +346,13 @@ def nl2sql_pipeline(
 
     result_markdown = dataframe_to_markdown(result_df)
 
-    # ----------------------
-    # 5. Generate natural language answer
-    # ----------------------
+    # 6. Natural language answer
     try:
-        natural_answer = generate_natural_answer(user_query, sql_query, result_markdown)
-    except Exception as e:
+        natural_answer = generate_natural_answer(user_query, sql_query, result_markdown, history)
+    except Exception:
         natural_answer = "Could not generate a natural language summary."
 
-    # ----------------------
-    # 6. Log to DB
-    # ----------------------
+    # 7. Log
     try:
         log_nl2sql(
             user_id=user_id,
@@ -294,7 +361,7 @@ def nl2sql_pipeline(
             sql_query=sql_query
         )
     except Exception:
-        pass  # Don't fail the response just because logging failed
+        pass
 
     return {
         "user_query": user_query,

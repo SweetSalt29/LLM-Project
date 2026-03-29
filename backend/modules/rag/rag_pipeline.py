@@ -15,8 +15,9 @@ class RAGPipeline:
 
     # -----------------------------
     # LLM CALL (OpenRouter)
+    # Accepts a full messages list for multi-turn support
     # -----------------------------
-    def call_llm(self, prompt: str):
+    def call_llm(self, messages: list) -> str:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -25,42 +26,44 @@ class RAGPipeline:
             },
             json={
                 "model": self.model,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ]
+                "messages": messages
             }
         )
-
         data = response.json()
-
-        return data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"]["content"].strip()
 
     # -----------------------------
-    # QUERY (FULL RAG)
+    # QUERY WITH CONVERSATION MEMORY
+    # history: list of {"role": "user"/"assistant", "content": str}
     # -----------------------------
-    def query(self, query: str):
+    def query(self, query: str, history: list = None) -> dict:
+        if history is None:
+            history = []
+
         self.embedder.load_or_create()
         docs = self.embedder.retrieve(query, k=5)
-
         context = "\n\n".join([doc.page_content for doc in docs])
 
-        prompt = f"""
-You are an intelligent assistant.
+        # System prompt — sets the assistant's behaviour
+        system_prompt = {
+            "role": "user",
+            "content": (
+                "You are an intelligent document assistant. "
+                "Answer questions using ONLY the provided document context. "
+                "If the answer is not in the context, say: "
+                "'I could not find this in the uploaded documents.' "
+                "Be concise and conversational. Remember the conversation history."
+                f"\n\nDocument Context:\n{context}"
+            )
+        }
 
-Answer ONLY from the provided context.
-If answer is not found, say:
-"I could not find this in the uploaded documents."
+        # Build messages: system → history → current question
+        messages = [system_prompt]
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": query})
 
-Context:
-{context}
-
-Question:
-{query}
-
-Answer:
-"""
-
-        answer = self.call_llm(prompt)
+        answer = self.call_llm(messages)
 
         return {
             "answer": answer,
@@ -72,3 +75,29 @@ Answer:
                 for doc in docs
             ]
         }
+
+    # -----------------------------
+    # SUMMARIZE CONVERSATION
+    # -----------------------------
+    def summarize_conversation(self, history: list) -> str:
+        if not history:
+            return "No conversation to summarize yet."
+
+        history_text = "\n".join([
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in history
+        ])
+
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Summarize the following conversation between a user and a document assistant. "
+                    "Highlight: key questions asked, main answers given, and important findings.\n\n"
+                    f"Conversation:\n{history_text}\n\n"
+                    "Summary:"
+                )
+            }
+        ]
+
+        return self.call_llm(messages)
