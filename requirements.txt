@@ -1,0 +1,56 @@
+# ========================
+# WEB FRAMEWORK
+# ========================
+fastapi
+uvicorn[standard]
+python-multipart          # required for FastAPI file uploads and form data
+
+# ========================
+# AUTHENTICATION
+# ========================
+python-jose[cryptography] # JWT token creation and verification
+passlib[bcrypt]           # password hashing
+
+# ========================
+# DATABASE
+# ========================
+# SQLite is built into Python — no install needed
+
+# ========================
+# RAG — DOCUMENT LOADING
+# ========================
+docling                   # primary PDF/document parser
+langchain-docling         # LangChain wrapper for Docling
+pymupdf                   # image extraction from PDFs (fitz)
+
+# ========================
+# RAG — EMBEDDINGS & VECTOR STORE
+# ========================
+langchain-core
+langchain-community
+langchain-huggingface
+sentence-transformers     # HuggingFace all-mpnet-base-v2 model
+faiss-cpu                 # vector similarity search (use faiss-gpu if on CUDA)
+
+# ========================
+# NL2SQL
+# ========================
+pandas
+openpyxl                  # Excel (.xlsx) read support for pandas
+xlrd                      # Excel (.xls) read support for pandas
+tabulate                  # required for DataFrame.to_markdown()
+
+# ========================
+# LLM — OPENROUTER API
+# ========================
+requests                  # HTTP calls to OpenRouter
+
+# ========================
+# FRONTEND
+# ========================
+streamlit
+
+# ========================
+# UTILITIES
+# ========================
+python-dotenv             # load OPENROUTER_API_KEY from .env file
