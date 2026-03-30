@@ -156,6 +156,29 @@ def get_session_messages(session_id: str) -> list:
     return [{"role": r[0], "content": r[1], "timestamp": r[2]} for r in rows]
 
 
+def get_recent_messages(session_id: str, window: int = 10) -> list:
+    """
+    Load only the most recent N messages for a session (sliding window).
+    Used for LLM context — keeps the active window small as chats grow.
+    window=10 means last 10 messages = last 5 turns.
+    Full history is still preserved in DB for summarization/reload.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT role, content, timestamp
+           FROM chat_messages
+           WHERE session_id = ?
+           ORDER BY id DESC
+           LIMIT ?""",
+        (session_id, window)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    # Reverse so oldest-first order for LLM context
+    return [{"role": r[0], "content": r[1], "timestamp": r[2]} for r in reversed(rows)]
+
+
 def build_history_string(messages: list, max_turns: int = 10) -> str:
     """
     Format the last N conversation turns into a string for LLM context.

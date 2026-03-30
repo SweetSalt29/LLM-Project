@@ -32,6 +32,7 @@ llm_venv/
 # Data Files (uploads, samples)
 # ========================
 data/
+faiss_index
 data/uploads/
 data/temp/
 data/processed/

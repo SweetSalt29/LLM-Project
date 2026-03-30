@@ -1,16 +1,16 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
 from backend.state.session_manager import get_active_file
 from backend.modules.rag.rag_pipeline import RAGPipeline
 from backend.modules.nl2sql import nl2sql_pipeline, summarize_conversation as nl2sql_summarize
 from backend.modules.chat_memory import (
     create_session, get_user_sessions, get_session_messages,
-    save_message, update_session_title, update_session_summary
+    get_recent_messages, save_message, update_session_title, update_session_summary
 )
 from backend.core.security import get_current_user
 from pydantic import BaseModel
 from typing import Optional
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -40,6 +40,8 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
+
+    # Create table if it doesn't exist at all
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS queries (
         id        INTEGER PRIMARY KEY,
@@ -50,6 +52,12 @@ def init_db():
         timestamp TEXT
     )
     """)
+
+    # Migrate: add 'mode' column if table was created with old schema (had 'route' instead)
+    existing_columns = [row[1] for row in cursor.execute("PRAGMA table_info(queries)").fetchall()]
+    if "mode" not in existing_columns:
+        cursor.execute("ALTER TABLE queries ADD COLUMN mode TEXT")
+
     conn.commit()
     conn.close()
 
@@ -62,7 +70,7 @@ def log_query(user_id: int, query: str, response: dict, mode: str):
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO queries (user_id, query, response, mode, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (user_id, query, json.dumps(response), mode, datetime.utcnow().isoformat())
+        (user_id, query, json.dumps(response), mode, datetime.now(timezone.utc).isoformat())
     )
     conn.commit()
     conn.close()
@@ -115,8 +123,12 @@ def chat(req: ChatRequest, user_id: int = Depends(get_current_user)):
                 title="New Chat"
             )
 
-        # Load full conversation history from DB (in-chat memory)
-        history = get_session_messages(session_id)
+        # Load sliding window (last 10 msgs) for LLM context
+        # Full history preserved in DB — only recent turns sent to LLM
+        history = get_recent_messages(session_id, window=10)
+
+        # Load full history only for session title check (first message detection)
+        full_history = get_session_messages(session_id)
 
         # ========================
         # EXECUTION — mode-based routing
@@ -126,10 +138,15 @@ def chat(req: ChatRequest, user_id: int = Depends(get_current_user)):
             result = pipeline.query(req.query, history=history)
             assistant_content = result["answer"]
 
+            # standalone_query: rewritten explicit version used for FAISS retrieval
+            # Store this in DB instead of raw query so future context is always clean
+            standalone_query = result.get("retrieval_query", req.query)
+
             response_payload = {
-                "answer":     result["answer"],
-                "sources":    result["sources"],
-                "session_id": session_id
+                "answer":           result["answer"],
+                "sources":          result["sources"],
+                "session_id":       session_id,
+                "standalone_query": standalone_query   # exposed for frontend debugging
             }
 
         else:  # req.mode == "sql"
@@ -145,16 +162,20 @@ def chat(req: ChatRequest, user_id: int = Depends(get_current_user)):
                 raise HTTPException(status_code=500, detail=result["error"])
 
             assistant_content = result["natural_answer"]
+            # NL2SQL has its own rewriting in generate_sql — store original
+            standalone_query = req.query
             response_payload = {**result, "session_id": session_id}
 
         # ========================
         # SAVE MESSAGES (in-chat memory)
+        # Store standalone (rewritten) query — not raw — so future
+        # sliding window context is always made of explicit questions
         # ========================
-        save_message(session_id, "user", req.query)
+        save_message(session_id, "user", standalone_query)
         save_message(session_id, "assistant", assistant_content)
 
-        # Title session from first user message
-        if not history:
+        # Title session from first user message (use original for readability)
+        if not full_history:
             update_session_title(session_id, req.query[:60])
 
         # ========================

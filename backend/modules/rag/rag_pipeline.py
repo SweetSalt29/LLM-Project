@@ -7,15 +7,14 @@ import os
 class RAGPipeline:
     def __init__(self, user_id: int):
         self.user_id = user_id
-        self.loader = MultimodalLoader()
+        self.loader  = MultimodalLoader()
         self.embedder = EmbeddingManager(user_id)
 
         self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.model = "meta-llama/llama-3-8b-instruct"
+        self.model   = "meta-llama/llama-3-8b-instruct"
 
     # -----------------------------
-    # LLM CALL (OpenRouter)
-    # Accepts a full messages list for multi-turn support
+    # LLM CALL
     # -----------------------------
     def call_llm(self, messages: list) -> str:
         response = requests.post(
@@ -33,6 +32,65 @@ class RAGPipeline:
         return data["choices"][0]["message"]["content"].strip()
 
     # -----------------------------
+    # QUERY REWRITING
+    # Expands vague/pronoun-heavy queries into fully explicit ones
+    # using recent conversation history before hitting the vector store.
+    #
+    # Example:
+    #   History : User asked about "company_report.pdf"
+    #   Query   : "what does it say about revenue?"
+    #   Rewritten: "What does company_report.pdf say about revenue?"
+    #
+    # If the query is already self-contained, the LLM returns it unchanged.
+    # -----------------------------
+    def rewrite_query(self, query: str, history: list) -> str:
+        """
+        Rewrite the query into a fully standalone question using
+        conversation history. Returns the rewritten query string.
+        Falls back to the original query if rewriting fails.
+        """
+        # No history = first message, nothing to resolve
+        if not history:
+            return query
+
+        # Only use the last 6 messages (3 turns) — enough context, not too noisy
+        recent = history[-6:]
+        history_text = "\n".join([
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in recent
+        ])
+
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "You are a query rewriting assistant.\n\n"
+                    "Given the conversation history and a follow-up question, "
+                    "rewrite the follow-up question into a fully self-contained, "
+                    "explicit question that can be understood without any prior context.\n\n"
+                    "Rules:\n"
+                    "- Resolve all pronouns (it, they, this, that, he, she) to their actual referents.\n"
+                    "- Expand references like 'the document', 'the file', 'the same topic' "
+                    "to the specific subject from history.\n"
+                    "- If the question is already fully clear and self-contained, return it unchanged.\n"
+                    "- Output ONLY the rewritten question — no explanation, no preamble.\n\n"
+                    f"Conversation history:\n{history_text}\n\n"
+                    f"Follow-up question: {query}\n\n"
+                    "Rewritten question:"
+                )
+            }
+        ]
+
+        try:
+            rewritten = self.call_llm(messages).strip()
+            # Safety: if LLM returns something empty or way too long, fall back
+            if not rewritten or len(rewritten) > 500:
+                return query
+            return rewritten
+        except Exception:
+            return query  # always fall back gracefully
+
+    # -----------------------------
     # QUERY WITH CONVERSATION MEMORY
     # history: list of {"role": "user"/"assistant", "content": str}
     # -----------------------------
@@ -41,10 +99,19 @@ class RAGPipeline:
             history = []
 
         self.embedder.load_or_create()
-        docs = self.embedder.retrieve(query, k=5)
+
+        # Step 1: Rewrite the query into a standalone explicit question
+        # before hitting FAISS. Resolves pronouns and vague references.
+        # If history is empty (first message), original query is returned unchanged.
+        retrieval_query = self.rewrite_query(query, history)
+
+        # Step 2: Retrieve using the rewritten query
+        docs = self.embedder.retrieve(retrieval_query, k=5)
         context = "\n\n".join([doc.page_content for doc in docs])
 
-        # System prompt — sets the assistant's behaviour
+        # Step 3: Answer using original query + history + retrieved context
+        # We pass the original query to the LLM (not rewritten) so the
+        # response feels natural, not robotic
         system_prompt = {
             "role": "user",
             "content": (
@@ -57,7 +124,6 @@ class RAGPipeline:
             )
         }
 
-        # Build messages: system → history → current question
         messages = [system_prompt]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -67,10 +133,11 @@ class RAGPipeline:
 
         return {
             "answer": answer,
+            "retrieval_query": retrieval_query,  # useful for debugging
             "sources": [
                 {
                     "source": doc.metadata.get("source"),
-                    "page": doc.metadata.get("page")
+                    "page":   doc.metadata.get("page")
                 }
                 for doc in docs
             ]
