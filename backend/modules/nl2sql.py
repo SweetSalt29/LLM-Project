@@ -150,25 +150,40 @@ def load_files_to_sqlite(file_paths: list[str]) -> tuple[sqlite3.Connection, dic
 # ============================================================
 def build_schema_string(schema_info: dict, conn: sqlite3.Connection) -> str:
     """
-    Build a detailed schema string with column names and a sample
-    data row so the LLM understands actual values and data types.
+    Build a detailed schema string with:
+    - Exact sanitized column names
+    - Column data types inferred from actual data
+    - 3 sample rows so LLM understands content and can identify numeric columns
     """
     lines = []
     for table, columns in schema_info.items():
         lines.append(f"Table: `{table}`")
-        lines.append("Columns (use these EXACT names in your SQL query):")
-        for col in columns:
-            lines.append(f"  - `{col}`")
+        lines.append("Columns (use EXACT names as shown — already sanitized, no spaces):")
 
-        # Add one sample row so LLM understands data format
         try:
-            sample_df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 1", conn)
+            sample_df = pd.read_sql_query(f"SELECT * FROM `{table}` LIMIT 3", conn)
+
+            for col in columns:
+                dtype = sample_df[col].dtype if col in sample_df.columns else "unknown"
+                # Map pandas dtype to human-readable type
+                if pd.api.types.is_integer_dtype(dtype):
+                    col_type = "INTEGER"
+                elif pd.api.types.is_float_dtype(dtype):
+                    col_type = "FLOAT"
+                elif pd.api.types.is_bool_dtype(dtype):
+                    col_type = "BOOLEAN"
+                else:
+                    col_type = "TEXT"
+                lines.append(f"  - `{col}` ({col_type})")
+
             if not sample_df.empty:
-                lines.append("Sample row:")
-                for col in columns:
-                    lines.append(f"  {col}: {sample_df[col].iloc[0]}")
+                lines.append(f"Sample data ({min(3, len(sample_df))} rows):")
+                lines.append(sample_df.to_string(index=False))
+
         except Exception:
-            pass
+            # Fallback: just list column names without types
+            for col in columns:
+                lines.append(f"  - `{col}`")
 
         lines.append("")
 
@@ -218,8 +233,11 @@ def generate_sql(user_query: str, schema_string: str, history: list) -> str:
         f"\nUser now asks: \"{user_query}\"\n\n"
         "Rules:\n"
         "- Write ONLY a valid SQLite SELECT query.\n"
-        "- Use the EXACT column names listed in the schema above — do not guess or rename them.\n"
+        "- Use the EXACT column names from the schema — do not guess, rename, or derive new ones.\n"
         "- Column names are already sanitized (no spaces or special characters).\n"
+        "- Use the sample data rows to identify which columns hold numeric values for aggregations.\n"
+        "- For AVG, SUM, MIN, MAX — only use columns shown as INTEGER or FLOAT in the schema.\n"
+        "- Never use CAST, SUBSTR, or string manipulation to extract numbers from text columns.\n"
         "- Do NOT use INSERT, UPDATE, DELETE, DROP, ALTER, or any write operations.\n"
         "- Do NOT include markdown, code blocks, backtick fences, or any explanation.\n"
         "- Use conversation history to resolve references like 'that column', 'same filter'.\n"

@@ -5,7 +5,7 @@ Handles all persistent storage for chat sessions, messages, and summaries.
 
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 DB_PATH = "app.db"
 
@@ -53,7 +53,7 @@ init_chat_tables()
 def create_session(user_id: int, mode: str, title: str = None) -> str:
     """Create a new chat session. Returns session_id."""
     session_id = str(uuid.uuid4())
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -93,7 +93,7 @@ def update_session_title(session_id: str, title: str):
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE session_id = ?",
-        (title[:60], datetime.utcnow().isoformat(), session_id)
+        (title[:60], datetime.now(timezone.utc).isoformat(), session_id)
     )
     conn.commit()
     conn.close()
@@ -105,7 +105,7 @@ def update_session_summary(session_id: str, summary: str):
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE chat_sessions SET summary = ?, updated_at = ? WHERE session_id = ?",
-        (summary, datetime.utcnow().isoformat(), session_id)
+        (summary, datetime.now(timezone.utc).isoformat(), session_id)
     )
     conn.commit()
     conn.close()
@@ -117,7 +117,7 @@ def touch_session(session_id: str):
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?",
-        (datetime.utcnow().isoformat(), session_id)
+        (datetime.now(timezone.utc).isoformat(), session_id)
     )
     conn.commit()
     conn.close()
@@ -133,7 +133,7 @@ def save_message(session_id: str, role: str, content: str):
     cursor.execute(
         """INSERT INTO chat_messages (session_id, role, content, timestamp)
            VALUES (?, ?, ?, ?)""",
-        (session_id, role, content, datetime.utcnow().isoformat())
+        (session_id, role, content, datetime.now(timezone.utc).isoformat())
     )
     conn.commit()
     conn.close()
