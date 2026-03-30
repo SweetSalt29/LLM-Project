@@ -413,15 +413,20 @@ def rag_page():
             # Update session_id (set on first message)
             st.session_state.session_id = session_id
 
-            # Format answer with sources
+            # Format sources — one compact line, deduplicated by pipeline
             source_text = ""
             if sources:
-                source_lines = [
-                    f"- {s['source']} (page {s['page']})"
-                    for s in sources if s.get("source")
-                ]
-                if source_lines:
-                    source_text = "\n\n**Sources:**\n" + "\n".join(source_lines)
+                # Build compact labels: "file.pdf p.3" or just "file.pdf" if page is None
+                labels = []
+                for s in sources:
+                    if not s.get("source"):
+                        continue
+                    label = s["source"]
+                    if s.get("page") is not None:
+                        label += f" (p.{s['page']})"
+                    labels.append(label)
+                if labels:
+                    source_text = "\n\n📄 _Source: " + " · ".join(labels) + "_"
 
             st.session_state.messages.append({
                 "role": "assistant",

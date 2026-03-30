@@ -67,16 +67,20 @@ class RAGPipeline:
                     "You are a query rewriting assistant.\n\n"
                     "Given the conversation history and a follow-up question, "
                     "rewrite the follow-up question into a fully self-contained, "
-                    "explicit question that can be understood without any prior context.\n\n"
+                    "explicit question that can be understood WITHOUT any prior context.\n\n"
                     "Rules:\n"
-                    "- Resolve all pronouns (it, they, this, that, he, she) to their actual referents.\n"
-                    "- Expand references like 'the document', 'the file', 'the same topic' "
-                    "to the specific subject from history.\n"
-                    "- If the question is already fully clear and self-contained, return it unchanged.\n"
+                    "- ALWAYS replace pronouns (it, they, this, that, he, she, its, their) "
+                    "with the explicit noun they refer to from the conversation history.\n"
+                    "- ALWAYS expand vague references like 'the document', 'the file', "
+                    "'the same', 'that topic', 'the above' to their specific subject.\n"
+                    "- NEVER leave any pronoun or vague reference unresolved.\n"
+                    "- NEVER return the question unchanged if it contains any pronoun or reference.\n"
+                    "- If the question is genuinely standalone with no pronouns or references, "
+                    "return it unchanged.\n"
                     "- Output ONLY the rewritten question — no explanation, no preamble.\n\n"
                     f"Conversation history:\n{history_text}\n\n"
                     f"Follow-up question: {query}\n\n"
-                    "Rewritten question:"
+                    "Rewritten standalone question:"
                 )
             }
         ]
@@ -131,16 +135,22 @@ class RAGPipeline:
 
         answer = self.call_llm(messages)
 
+        # Deduplicate sources — same file+page combo counts once
+        # Filter out None pages since they add no useful info when duplicated
+        seen = set()
+        unique_sources = []
+        for doc in docs:
+            source = doc.metadata.get("source")
+            page   = doc.metadata.get("page")
+            key    = (source, page)
+            if key not in seen:
+                seen.add(key)
+                unique_sources.append({"source": source, "page": page})
+
         return {
-            "answer": answer,
-            "retrieval_query": retrieval_query,  # useful for debugging
-            "sources": [
-                {
-                    "source": doc.metadata.get("source"),
-                    "page":   doc.metadata.get("page")
-                }
-                for doc in docs
-            ]
+            "answer":           answer,
+            "retrieval_query":  retrieval_query,
+            "sources":          unique_sources
         }
 
     # -----------------------------
