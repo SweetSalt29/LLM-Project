@@ -345,10 +345,13 @@ def rag_page():
 
     # ---- Upload section ----
     with st.expander("📁 Upload Document", expanded=(st.session_state.doc_status is None)):
-        st.caption("Accepted: PDF, DOC, DOCX, TXT")
+        # UPDATE 1: Modified the caption text
+        st.caption("Accepted: PDF, DOC, DOCX, TXT, MSG, CHM")
+        
+        # UPDATE 2: Added 'msg' and 'chm' to the accepted types list
         file = st.file_uploader(
             "Upload document file",
-            type=["pdf", "doc", "docx", "txt"],
+            type=["pdf", "doc", "docx", "txt", "msg", "chm"],
             key="rag_uploader"
         )
         if st.button("Upload", key="rag_upload_btn"):

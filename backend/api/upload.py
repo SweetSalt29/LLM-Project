@@ -12,7 +12,8 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 # ========================
 # PIPELINE-AWARE EXTENSION SETS
 # ========================
-RAG_EXTENSIONS  = {"pdf", "doc", "docx", "txt"}
+# UPDATE: Added "msg" and "chm" to the allowed RAG extensions
+RAG_EXTENSIONS  = {"pdf", "doc", "docx", "txt", "msg", "chm"}
 SQL_EXTENSIONS  = {"csv", "xlsx", "xls", "db", "sql"}
 ALL_EXTENSIONS  = RAG_EXTENSIONS | SQL_EXTENSIONS
 
@@ -60,7 +61,7 @@ async def upload_files(
     Upload one or more files.
 
     Accepted types:
-    - RAG  : pdf, doc, docx, txt
+    - RAG  : pdf, doc, docx, txt, msg, chm
     - NL2SQL: csv, xlsx, xls, db, sql
 
     Mixing RAG and SQL files in a single upload is not allowed —
@@ -106,7 +107,7 @@ async def upload_files(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     "Mixed upload not allowed. "
-                    "Please upload document files (pdf, doc, docx, txt) "
+                    "Please upload document files (pdf, doc, docx, txt, msg, chm) "
                     "and data files (csv, xlsx, xls, db, sql) separately."
                 )
             )
