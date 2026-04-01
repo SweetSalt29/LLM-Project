@@ -8,13 +8,18 @@ from pathlib import Path
 
 import requests
 
+from backend.modules.chat_memory import (
+    get_standalone_context,
+    save_standalone_message
+)
+
 # ============================================================
 # CONFIG
 # ============================================================
-UPLOAD_DIR = "data/uploads"
-NL2SQL_DB = "app.db"
+NL2SQL_DB          = "app.db"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "meta-llama/llama-3-8b-instruct"
+REWRITE_MODEL      = "meta-llama/llama-3.2-3b-instruct"
+MODEL              = "meta-llama/llama-3-8b-instruct"
 
 
 # ============================================================
@@ -54,7 +59,7 @@ def log_nl2sql(user_id: int, session_id: str, user_query: str, sql_query: str):
 
 
 # ============================================================
-# GUARDRAILS — allow SELECT only
+# GUARDRAILS
 # ============================================================
 FORBIDDEN_KEYWORDS = [
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
@@ -64,65 +69,51 @@ FORBIDDEN_KEYWORDS = [
 
 def is_safe_sql(sql: str) -> tuple[bool, str]:
     cleaned = sql.strip().upper()
-
     if not cleaned.startswith("SELECT"):
-        return False, "Only SELECT queries are allowed. Write operations are blocked."
-
+        return False, "Only SELECT queries are allowed."
     for keyword in FORBIDDEN_KEYWORDS:
-        pattern = rf"\b{keyword}\b"
-        if re.search(pattern, cleaned):
+        if re.search(rf"\b{keyword}\b", cleaned):
             return False, f"Query contains forbidden keyword: {keyword}"
-
     if "--" in sql or "/*" in sql:
         return False, "SQL comments are not allowed."
-
     return True, ""
 
 
 # ============================================================
-# COLUMN NAME SANITIZER
-# Renames columns with spaces/special chars so SQLite handles
-# them cleanly, and keeps a mapping back to original names.
+# COLUMN SANITIZER
 # ============================================================
 def sanitize_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """
-    Replace spaces and special characters in column names with underscores.
-    Returns sanitized DataFrame and a mapping {new_name: original_name}.
-    """
-    mapping = {}
+    mapping     = {}
     new_columns = []
-
     for col in df.columns:
         new_col = re.sub(r"[^a-zA-Z0-9]", "_", str(col)).strip("_")
-        # Handle duplicates after sanitization
-        base = new_col
-        count = 1
+        base, count = new_col, 1
         while new_col in mapping:
             new_col = f"{base}_{count}"
-            count += 1
+            count  += 1
         mapping[new_col] = col
         new_columns.append(new_col)
-
     df = df.copy()
     df.columns = new_columns
     return df, mapping
 
 
 # ============================================================
-# FILE LOADER — load CSV/Excel into in-memory SQLite
+# FILE LOADER — load all session files into in-memory SQLite
+# Each file becomes its own table so multi-file queries work.
 # ============================================================
 def load_files_to_sqlite(file_paths: list[str]) -> tuple[sqlite3.Connection, dict]:
     """
-    Load each file into an in-memory SQLite DB.
-    Columns are sanitized so SQLite never sees spaces or slashes.
-    Returns (connection, schema_info) where schema_info maps
-    table_name -> list of sanitized column names.
+    Load each CSV/Excel file as a separate table in one in-memory SQLite DB.
+    schema_info: {table_name: [sanitized_col, ...]}
+    file_map:    {table_name: original_file_name}  — for attribution in prompts.
     """
-    conn = sqlite3.connect(":memory:")
+    conn        = sqlite3.connect(":memory:")
     schema_info = {}
+    file_map    = {}
 
     for path in file_paths:
-        suffix = Path(path).suffix.lower()
+        suffix     = Path(path).suffix.lower()
         table_name = Path(path).stem.lower()
         table_name = re.sub(r"[^a-z0-9_]", "_", table_name)
 
@@ -131,41 +122,35 @@ def load_files_to_sqlite(file_paths: list[str]) -> tuple[sqlite3.Connection, dic
         elif suffix in [".xlsx", ".xls"]:
             df = pd.read_excel(path)
         else:
-            continue  # skip unsupported silently
+            continue
 
-        # Sanitize column names before loading into SQLite
-        df, col_mapping = sanitize_columns(df)
-
+        df, _ = sanitize_columns(df)
         df.to_sql(table_name, conn, index=False, if_exists="replace")
-
-        # Store sanitized column names in schema (what LLM must use)
         schema_info[table_name] = list(df.columns)
+        file_map[table_name]    = Path(path).name
 
-    return conn, schema_info
+    return conn, schema_info, file_map
 
 
 # ============================================================
 # SCHEMA BUILDER
-# Shows exact column names the LLM must use, with a sample row
+# Includes file name per table so LLM knows which file = which table.
 # ============================================================
-def build_schema_string(schema_info: dict, conn: sqlite3.Connection) -> str:
-    """
-    Build a detailed schema string with:
-    - Exact sanitized column names
-    - Column data types inferred from actual data
-    - 3 sample rows so LLM understands content and can identify numeric columns
-    """
+def build_schema_string(
+    schema_info: dict,
+    conn: sqlite3.Connection,
+    file_map: dict
+) -> str:
     lines = []
     for table, columns in schema_info.items():
-        lines.append(f"Table: `{table}`")
-        lines.append("Columns (use EXACT names as shown — already sanitized, no spaces):")
+        original_name = file_map.get(table, table)
+        lines.append(f"Table: `{table}` (from file: '{original_name}')")
+        lines.append("Columns (sanitized — use EXACT names):")
 
         try:
             sample_df = pd.read_sql_query(f"SELECT * FROM `{table}` LIMIT 3", conn)
-
             for col in columns:
                 dtype = sample_df[col].dtype if col in sample_df.columns else "unknown"
-                # Map pandas dtype to human-readable type
                 if pd.api.types.is_integer_dtype(dtype):
                     col_type = "INTEGER"
                 elif pd.api.types.is_float_dtype(dtype):
@@ -179,9 +164,7 @@ def build_schema_string(schema_info: dict, conn: sqlite3.Connection) -> str:
             if not sample_df.empty:
                 lines.append(f"Sample data ({min(3, len(sample_df))} rows):")
                 lines.append(sample_df.to_string(index=False))
-
         except Exception:
-            # Fallback: just list column names without types
             for col in columns:
                 lines.append(f"  - `{col}`")
 
@@ -191,63 +174,134 @@ def build_schema_string(schema_info: dict, conn: sqlite3.Connection) -> str:
 
 
 # ============================================================
-# LLM CALL
+# LLM CALLS
 # ============================================================
-def call_llm(messages: list) -> str:
+def call_llm(messages: list, model: str = MODEL) -> str:
     response = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type":  "application/json"
         },
-        json={
-            "model": MODEL,
-            "messages": messages
-        }
+        json={"model": model, "messages": messages}
     )
-    data = response.json()
-    return data["choices"][0]["message"]["content"].strip()
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def call_rewrite_llm(messages: list) -> str:
+    return call_llm(messages, model=REWRITE_MODEL)
 
 
 # ============================================================
-# SQL GENERATION — with conversation history for context
+# CONTEXT BUILDER
 # ============================================================
-def generate_sql(user_query: str, schema_string: str, history: list) -> str:
-    history_text = ""
-    if history:
-        recent = history[-12:]
-        history_text = "\n".join([
-            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-            for m in recent
-        ])
+def build_context_str(context_rows: list) -> str:
+    if not context_rows:
+        return ""
+    lines = []
+    for i, row in enumerate(context_rows, 1):
+        lines.append(f"Turn {i}:")
+        lines.append(f"  Q: {row['standalone_query']}")
+        lines.append(f"  A: {row['answer_summary']}")
+    return "\n".join(lines)
 
-    prompt_text = (
+
+# ============================================================
+# STANDALONE REWRITE
+# ============================================================
+def rewrite_as_standalone(user_query: str, context_str: str) -> str:
+    if not context_str.strip():
+        return user_query
+
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "You are a query rewriting assistant.\n\n"
+                "Given prior conversation context and a follow-up question, "
+                "rewrite the follow-up into a fully self-contained, explicit question "
+                "that can be understood WITHOUT any prior context.\n\n"
+                "Rules:\n"
+                "- Replace ALL pronouns (it, they, this, that, its, their) "
+                "with the explicit noun they refer to.\n"
+                "- Expand vague references like 'the table', 'the same filter', "
+                "'that column', 'the above' to their specific subject.\n"
+                "- If the question is already standalone, return it unchanged.\n"
+                "- Output ONLY the rewritten question — no explanation.\n\n"
+                f"Prior conversation context:\n{context_str}\n\n"
+                f"Follow-up question: {user_query}\n\n"
+                "Rewritten standalone question:"
+            )
+        }
+    ]
+    try:
+        rewritten = call_rewrite_llm(messages).strip()
+        return rewritten if rewritten and len(rewritten) <= 500 else user_query
+    except Exception:
+        return user_query
+
+
+# ============================================================
+# ANSWER SUMMARIZER
+# ============================================================
+def summarize_answer(standalone_query: str, natural_answer: str) -> str:
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Summarize the following answer in 2-3 sentences only. "
+                "Be concise and preserve the key facts.\n\n"
+                f"Question: {standalone_query}\n"
+                f"Answer: {natural_answer}\n\n"
+                "2-3 sentence summary:"
+            )
+        }
+    ]
+    try:
+        summary = call_rewrite_llm(messages).strip()
+        return summary if summary else natural_answer[:300]
+    except Exception:
+        return natural_answer[:300]
+
+
+# ============================================================
+# SQL GENERATION
+# file_map injected into prompt so LLM knows table → file mapping.
+# ============================================================
+def generate_sql(
+    user_query: str,
+    schema_string: str,
+    context_str: str,
+    file_map: dict
+) -> str:
+    file_note = "\n".join([
+        f"  - Table `{t}` comes from file '{f}'"
+        for t, f in file_map.items()
+    ])
+
+    prompt = (
         f"You are an expert SQLite assistant.\n\n"
         f"Database schema:\n{schema_string}\n"
+        f"File-to-table mapping:\n{file_note}\n"
     )
 
-    if history_text:
-        prompt_text += f"\nConversation so far:\n{history_text}\n"
+    if context_str:
+        prompt += f"\nPrior conversation context:\n{context_str}\n"
 
-    prompt_text += (
-        f"\nUser now asks: \"{user_query}\"\n\n"
+    prompt += (
+        f"\nUser asks: \"{user_query}\"\n\n"
         "Rules:\n"
         "- Write ONLY a valid SQLite SELECT query.\n"
-        "- Use the EXACT column names from the schema — do not guess, rename, or derive new ones.\n"
-        "- Column names are already sanitized (no spaces or special characters).\n"
-        "- Use the sample data rows to identify which columns hold numeric values for aggregations.\n"
-        "- For AVG, SUM, MIN, MAX — only use columns shown as INTEGER or FLOAT in the schema.\n"
-        "- Never use CAST, SUBSTR, or string manipulation to extract numbers from text columns.\n"
-        "- Do NOT use INSERT, UPDATE, DELETE, DROP, ALTER, or any write operations.\n"
-        "- Do NOT include markdown, code blocks, backtick fences, or any explanation.\n"
-        "- Use conversation history to resolve references like 'that column', 'same filter'.\n"
-        "- Output ONLY the raw SQL query and nothing else.\n\n"
+        "- Use EXACT column names from the schema.\n"
+        "- For cross-file questions, JOIN or UNION tables as appropriate.\n"
+        "- For AVG, SUM, MIN, MAX — only use INTEGER or FLOAT columns.\n"
+        "- Do NOT use INSERT, UPDATE, DELETE, DROP, ALTER, or write operations.\n"
+        "- Do NOT include markdown, code blocks, or explanation.\n"
+        "- Output ONLY the raw SQL query.\n\n"
         "SQL Query:"
     )
 
-    raw = call_llm([{"role": "user", "content": prompt_text}])
-
-    # Strip any accidental markdown fences
+    raw = call_llm([{"role": "user", "content": prompt}])
     raw = re.sub(r"```(?:sql)?", "", raw, flags=re.IGNORECASE).strip().rstrip("```").strip()
     return raw
 
@@ -259,61 +313,53 @@ def generate_natural_answer(
     user_query: str,
     sql_query: str,
     result_markdown: str,
-    history: list
+    context_str: str,
+    file_map: dict
 ) -> str:
-    history_text = ""
-    if history:
-        recent = history[-12:]
-        history_text = "\n".join([
-            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-            for m in recent
-        ])
+    file_list = ", ".join(f"'{v}'" for v in file_map.values())
 
-    prompt_text = "You are a helpful data analyst assistant.\n\n"
+    prompt = (
+        f"You are a helpful data analyst assistant.\n"
+        f"The data comes from these file(s): {file_list}\n\n"
+    )
 
-    if history_text:
-        prompt_text += f"Conversation so far:\n{history_text}\n\n"
+    if context_str:
+        prompt += f"Prior conversation context:\n{context_str}\n\n"
 
-    prompt_text += (
-        f"The user asked: \"{user_query}\"\n"
+    prompt += (
+        f"User asked: \"{user_query}\"\n"
         f"SQL run: {sql_query}\n"
         f"Result:\n{result_markdown}\n\n"
         "Write a clear, concise, friendly natural language answer. "
-        "Reference prior conversation context if relevant. "
+        "When the result spans multiple files/tables, clearly state which file each insight comes from. "
         "Do not repeat the SQL query."
     )
 
-    return call_llm([{"role": "user", "content": prompt_text}])
+    return call_llm([{"role": "user", "content": prompt}])
 
 
 # ============================================================
 # CONVERSATION SUMMARIZER
 # ============================================================
-def summarize_conversation(history: list) -> str:
-    if not history:
+def summarize_conversation(session_id: str) -> str:
+    context_rows = get_standalone_context(session_id, mode="sql", limit=5)
+    if not context_rows:
         return "No conversation to summarize yet."
 
-    history_text = "\n".join([
-        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-        for m in history
-    ])
-
-    prompt_text = (
+    context_str = build_context_str(context_rows)
+    prompt = (
         "Summarize the following data analysis conversation. "
         "Highlight: key questions asked, SQL queries run, and important findings.\n\n"
-        f"Conversation:\n{history_text}\n\nSummary:"
+        f"Conversation:\n{context_str}\n\nSummary:"
     )
-
-    return call_llm([{"role": "user", "content": prompt_text}])
+    return call_llm([{"role": "user", "content": prompt}])
 
 
 # ============================================================
 # RESULT FORMATTER
 # ============================================================
 def dataframe_to_markdown(df: pd.DataFrame) -> str:
-    if df.empty:
-        return "_No results found._"
-    return df.to_markdown(index=False)
+    return "_No results found._" if df.empty else df.to_markdown(index=False)
 
 
 # ============================================================
@@ -324,37 +370,41 @@ def nl2sql_pipeline(
     user_id: int,
     file_paths: list[str],
     session_id: str = None,
-    history: list = None
 ) -> dict:
     if session_id is None:
         session_id = str(uuid.uuid4())
-    if history is None:
-        history = []
 
-    # 1. Load files (columns sanitized inside)
+    # 1. Standalone context
+    context_rows = get_standalone_context(session_id, mode="sql", limit=5)
+    context_str  = build_context_str(context_rows)
+
+    # 2. Rewrite query
+    standalone_query = rewrite_as_standalone(user_query, context_str)
+
+    # 3. Load files (session-scoped)
     try:
-        conn, schema_info = load_files_to_sqlite(file_paths)
+        conn, schema_info, file_map = load_files_to_sqlite(file_paths)
     except Exception as e:
         return _error_response(user_query, f"Failed to load data files: {str(e)}")
 
     if not schema_info:
         return _error_response(user_query, "No valid CSV or Excel files found to query.")
 
-    # 2. Build schema string (passes conn for sample rows)
-    schema_string = build_schema_string(schema_info, conn)
+    # 4. Build schema
+    schema_string = build_schema_string(schema_info, conn, file_map)
 
-    # 3. Generate SQL
+    # 5. Generate SQL
     try:
-        sql_query = generate_sql(user_query, schema_string, history)
+        sql_query = generate_sql(standalone_query, schema_string, context_str, file_map)
     except Exception as e:
         return _error_response(user_query, f"Failed to generate SQL: {str(e)}")
 
-    # 4. Guardrail check
+    # 6. Guardrail
     is_safe, reason = is_safe_sql(sql_query)
     if not is_safe:
         return _error_response(user_query, f"Unsafe query blocked: {reason}", sql_query)
 
-    # 5. Execute SQL
+    # 7. Execute
     try:
         result_df = pd.read_sql_query(sql_query, conn)
     except Exception as e:
@@ -364,37 +414,47 @@ def nl2sql_pipeline(
 
     result_markdown = dataframe_to_markdown(result_df)
 
-    # 6. Natural language answer
+    # 8. Natural answer
     try:
-        natural_answer = generate_natural_answer(user_query, sql_query, result_markdown, history)
+        natural_answer = generate_natural_answer(
+            user_query, sql_query, result_markdown, context_str, file_map
+        )
     except Exception:
         natural_answer = "Could not generate a natural language summary."
 
-    # 7. Log
+    # 9. Summarize for storage
+    answer_summary = summarize_answer(standalone_query, natural_answer)
+
+    # 10. Save standalone turn
+    save_standalone_message(
+        session_id=session_id,
+        mode="sql",
+        user_query=user_query,
+        standalone_query=standalone_query,
+        llm_answer=natural_answer,
+        answer_summary=answer_summary
+    )
+
+    # 11. Log SQL
     try:
-        log_nl2sql(
-            user_id=user_id,
-            session_id=session_id,
-            user_query=user_query,
-            sql_query=sql_query
-        )
+        log_nl2sql(user_id, session_id, user_query, sql_query)
     except Exception:
         pass
 
     return {
-        "user_query": user_query,
-        "sql_query": sql_query,
-        "natural_answer": natural_answer,
+        "user_query":      user_query,
+        "sql_query":       sql_query,
+        "natural_answer":  natural_answer,
         "result_markdown": result_markdown,
-        "error": None
+        "error":           None
     }
 
 
 def _error_response(user_query: str, error: str, sql_query: str = "N/A") -> dict:
     return {
-        "user_query": user_query,
-        "sql_query": sql_query,
-        "natural_answer": None,
+        "user_query":      user_query,
+        "sql_query":       sql_query,
+        "natural_answer":  None,
         "result_markdown": None,
-        "error": error
+        "error":           error
     }

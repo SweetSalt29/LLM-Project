@@ -1,51 +1,51 @@
 from fastapi import APIRouter, UploadFile, Depends, HTTPException, status, File, BackgroundTasks
 from typing import List
 from backend.modules.file_handler import save_files
-from backend.state.session_manager import set_active_file, update_active_file_status, get_active_file
+from backend.modules.chat_memory import (
+    register_file, mark_file_indexed,
+    get_user_library, get_pending_files,
+    file_exists_in_library
+)
 from backend.core.security import get_current_user
 from backend.modules.rag.rag_pipeline import RAGPipeline
 from backend.modules.rag.rag_loader import prepare_documents
-import os
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
 # ========================
-# PIPELINE-AWARE EXTENSION SETS
+# EXTENSION SETS
 # ========================
-# UPDATE: Added "msg" and "chm" to the allowed RAG extensions
-RAG_EXTENSIONS  = {"pdf", "doc", "docx", "txt", "msg", "chm"}
-SQL_EXTENSIONS  = {"csv", "xlsx", "xls", "db", "sql"}
-ALL_EXTENSIONS  = RAG_EXTENSIONS | SQL_EXTENSIONS
+RAG_EXTENSIONS = {"pdf", "doc", "docx", "txt", "msg", "chm"}
+SQL_EXTENSIONS = {"csv", "xlsx", "xls", "db", "sql"}
+ALL_EXTENSIONS = RAG_EXTENSIONS | SQL_EXTENSIONS
+
 
 def get_pipeline(suffix: str) -> str:
-    """Return 'rag' or 'sql' based on file extension."""
-    if suffix in RAG_EXTENSIONS:
-        return "rag"
-    return "sql"
+    return "rag" if suffix in RAG_EXTENSIONS else "sql"
 
 
 # ========================
 # BACKGROUND INGESTION (RAG only)
-# SQL files are loaded at query time — no embedding needed.
+# Embeds one file at a time and marks it indexed on completion.
 # ========================
-def run_ingestion(user_id: int, paths: List[str]):
+def run_ingestion(user_id: int, file_path: str):
     """
-    Embed RAG documents into FAISS for the user.
-    Only called for RAG-type files.
+    Embed a single RAG file into FAISS and mark it indexed in file_library.
+    Called as a background task per file so partial failures don't block others.
     """
     try:
         pipeline = RAGPipeline(user_id)
         pipeline.embedder.load_or_create()
 
-        for path in paths:
-            docs = pipeline.loader.load(path)
-            prepared = prepare_documents(docs)
-            pipeline.embedder.add_documents(prepared)
+        docs     = pipeline.loader.load(file_path)
+        prepared = prepare_documents(docs)
+        pipeline.embedder.add_documents(prepared)
 
-        update_active_file_status(user_id, "ready")
+        mark_file_indexed(file_path, user_id)
 
     except Exception as e:
-        update_active_file_status(user_id, f"failed: {str(e)}")
+        # Log failure — file stays indexed=0 in library (visible as pending)
+        print(f"[run_ingestion] Failed for {file_path}: {e}")
 
 
 # ========================
@@ -58,19 +58,17 @@ async def upload_files(
     user_id: int = Depends(get_current_user)
 ):
     """
-    Upload one or more files.
+    Upload one or more files to the user's file library.
 
-    Accepted types:
-    - RAG  : pdf, doc, docx, txt, msg, chm
-    - NL2SQL: csv, xlsx, xls, db, sql
+    - RAG files (pdf, doc, docx, txt, msg, chm): embedded into FAISS in background.
+    - SQL files (csv, xlsx, xls, db, sql): registered immediately, ready to query.
+    - Mixed RAG+SQL uploads in one batch are blocked.
 
-    Mixing RAG and SQL files in a single upload is not allowed —
-    each upload should be one pipeline type.
+    Each file is registered individually in file_library.
+    Sessions choose which files to query at session creation time.
     """
     try:
-        # ========================
-        # VALIDATE EXTENSIONS
-        # ========================
+        # ── Validate extensions ────────────────────────────────────
         validated_files = []
         file_types      = []
         pipeline_types  = set()
@@ -98,10 +96,7 @@ async def upload_files(
             validated_files.append(file)
             file_types.append(suffix)
 
-        # ========================
-        # BLOCK MIXED UPLOADS
-        # RAG + SQL files in one batch makes routing ambiguous
-        # ========================
+        # ── Block mixed RAG+SQL uploads ────────────────────────────
         if len(pipeline_types) > 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -112,11 +107,9 @@ async def upload_files(
                 )
             )
 
-        primary_pipeline = pipeline_types.pop()  # "rag" or "sql"
+        primary_pipeline = pipeline_types.pop()
 
-        # ========================
-        # READ FILE BYTES (async)
-        # ========================
+        # ── Read file bytes ────────────────────────────────────────
         file_contents = []
         for file in validated_files:
             data = await file.read()
@@ -127,40 +120,58 @@ async def upload_files(
                 )
             file_contents.append((file.filename, data))
 
-        # ========================
-        # SAVE FILES TO DISK
-        # ========================
+        # ── Save to disk ───────────────────────────────────────────
         file_paths = save_files(file_contents, user_id)
 
-        # ========================
-        # UPDATE SESSION STATE
-        # ========================
-        set_active_file(user_id, {
-            "files":    file_paths,
-            "types":    file_types,
-            "pipeline": primary_pipeline,   # "rag" or "sql"
-            "status":   "processing" if primary_pipeline == "rag" else "ready"
-            # SQL files need no background processing — they're ready immediately
-        })
+        # ── Register each file in library + schedule ingestion ─────
+        registered = []
+        skipped    = []
+        for file_path, (file_name, _) in zip(file_paths, file_contents):
 
-        # ========================
-        # BACKGROUND INGESTION (RAG only)
-        # ========================
+            # Duplicate guard — same file_path already in library
+            if file_exists_in_library(user_id, file_path):
+                skipped.append(file_name)
+                continue
+
+            file_id = register_file(
+                user_id=user_id,
+                file_name=file_name,
+                file_path=file_path,
+                pipeline=primary_pipeline
+            )
+            registered.append({"file_id": file_id, "file_name": file_name, "file_path": file_path})
+
+            if primary_pipeline == "rag":
+                background_tasks.add_task(run_ingestion, user_id, file_path)
+
+        if not registered and skipped:
+            return {
+                "message":  f"All {len(skipped)} file(s) already exist in your library. Nothing uploaded.",
+                "pipeline": primary_pipeline,
+                "files":    [],
+                "skipped":  skipped
+            }
+
         if primary_pipeline == "rag":
-            background_tasks.add_task(run_ingestion, user_id, file_paths)
-            message = "Upload successful. Embedding documents in background."
+            message = (
+                f"{len(registered)} document(s) uploaded. "
+                "Embedding in background — they will appear in your library when ready."
+            )
         else:
-            message = "Upload successful. Data file is ready to query."
+            message = f"{len(registered)} data file(s) uploaded and ready to query."
+
+        if skipped:
+            message += f" ({len(skipped)} duplicate(s) skipped: {', '.join(skipped)})"
 
         return {
             "message":  message,
             "pipeline": primary_pipeline,
-            "count":    len(file_paths)
+            "files":    registered,
+            "skipped":  skipped
         }
 
     except HTTPException:
         raise
-
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -169,24 +180,25 @@ async def upload_files(
 
 
 # ========================
-# STATUS ENDPOINT
+# LIBRARY ENDPOINT
+# Returns all ready files for the user filtered by pipeline.
 # ========================
-@router.get("/status")
-def get_status(user_id: int = Depends(get_current_user)):
+@router.get("/library")
+def get_library(pipeline: str = "rag", user_id: int = Depends(get_current_user)):
     """
-    Returns current ingestion status.
-    SQL files are always 'ready' immediately after upload.
-    RAG files are 'processing' until embedding completes.
+    Returns all indexed (ready) files in the user's library for a given pipeline.
+    Used to populate the file selector when starting a new chat.
     """
-    state = get_active_file(user_id)
+    files = get_user_library(user_id, pipeline)
+    return {"files": files, "pipeline": pipeline}
 
-    if not state:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No files uploaded yet"
-        )
 
-    return {
-        "status":   state.get("status", "processing"),
-        "pipeline": state.get("pipeline", "rag")
-    }
+# ========================
+# PENDING ENDPOINT
+# Returns files still being embedded (indexed=0).
+# ========================
+@router.get("/pending")
+def get_pending(user_id: int = Depends(get_current_user)):
+    """Returns RAG files still being processed."""
+    pending = get_pending_files(user_id)
+    return {"pending": pending}
