@@ -54,21 +54,30 @@ def set_dynamic_background():
             color: #555 !important;
         }
 
+        .user-row {
+            display: flex;
+            justify-content: flex-end;
+            margin: 6px 0;
+        }
+        .assistant-row {
+            display: flex;
+            justify-content: flex-start;
+            margin: 6px 0;
+        }
         .user-bubble {
             background-color: rgba(255,255,255,0.15);
-            border-radius: 12px;
+            border-radius: 18px 18px 4px 18px;
             padding: 10px 14px;
-            margin: 6px 0;
-            text-align: right;
+            max-width: 75%;
+            text-align: left;
         }
         .assistant-bubble {
             background-color: rgba(0,0,0,0.25);
-            border-radius: 12px;
+            border-radius: 18px 18px 18px 4px;
             padding: 10px 14px;
-            margin: 6px 0;
+            max-width: 75%;
             text-align: left;
         }
-
         .library-file {
             background-color: rgba(255,255,255,0.1);
             border-radius: 8px;
@@ -341,12 +350,12 @@ def render_messages(messages: list):
     for msg in messages:
         if msg["role"] == "user":
             st.markdown(
-                f'<div class="user-bubble">🧑 {msg["content"]}</div>',
+                f'<div class="user-row"><div class="user-bubble">🧑 {msg["content"]}</div></div>',
                 unsafe_allow_html=True
             )
         else:
             st.markdown(
-                f'<div class="assistant-bubble">🤖 {msg["content"]}</div>',
+                f'<div class="assistant-row"><div class="assistant-bubble">🤖 {msg["content"]}</div></div>',
                 unsafe_allow_html=True
             )
 
@@ -745,7 +754,7 @@ def sql_page():
     for msg in st.session_state.messages:
         if msg["role"] == "user":
             st.markdown(
-                f'<div class="user-bubble">🧑 {msg["content"]}</div>',
+                f'<div class="user-row"><div class="user-bubble">🧑 {msg["content"]}</div></div>',
                 unsafe_allow_html=True
             )
         else:
@@ -755,7 +764,7 @@ def sql_page():
                     st.error(f"❌ {content['error']}")
                 else:
                     st.markdown(
-                        f'<div class="assistant-bubble">🤖 {content.get("natural_answer", "")}</div>',
+                        f'<div class="assistant-row"><div class="assistant-bubble">🤖 {content.get("natural_answer", "")}</div></div>',
                         unsafe_allow_html=True
                     )
                     with st.expander("🔍 SQL Query"):
@@ -774,7 +783,7 @@ def sql_page():
                         _render_chart(viz_config, result_data)
             else:
                 st.markdown(
-                    f'<div class="assistant-bubble">🤖 {content}</div>',
+                    f'<div class="assistant-row"><div class="assistant-bubble">🤖 {content}</div></div>',
                     unsafe_allow_html=True
                 )
 
