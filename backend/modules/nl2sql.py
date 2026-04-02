@@ -363,6 +363,103 @@ def dataframe_to_markdown(df: pd.DataFrame) -> str:
 
 
 # ============================================================
+# VISUALIZATION DECIDER
+# Uses a lightweight LLM call to decide chart type + axis columns.
+# Returns a viz_config dict consumed by the Streamlit frontend.
+#
+# chart_type options: "bar" | "line" | "pie" | "scatter" | "none"
+# "none" means: single-row detail query, or non-comparable result.
+# ============================================================
+def decide_visualization(
+    user_query: str,
+    result_df: pd.DataFrame,
+) -> dict:
+    """
+    Decide whether and how to visualize the query result.
+
+    Rules applied by the LLM:
+    - Single-row results (details about one item) → none
+    - Aggregates comparing multiple categories/items → bar
+    - Time-series or ordered numeric sequences → line
+    - Part-of-whole (percentages, shares) → pie
+    - Correlation between two numeric columns → scatter
+    - Text-only or ambiguous results → none
+
+    Returns:
+        {
+            "chart_type": "bar" | "line" | "pie" | "scatter" | "none",
+            "x_col":      "<column name or null>",
+            "y_col":      "<column name or null>",
+            "title":      "<short chart title or null>"
+        }
+    """
+    # Fast-path: empty or single-row — no chart needed
+    if result_df is None or result_df.empty or len(result_df) <= 1:
+        return {"chart_type": "none", "x_col": None, "y_col": None, "title": None}
+
+    columns      = list(result_df.columns)
+    num_rows     = len(result_df)
+    num_cols     = len(columns)
+    col_types    = {c: str(result_df[c].dtype) for c in columns}
+    sample_rows  = result_df.head(3).to_dict(orient="records")
+
+    prompt = (
+        "You are a data visualization advisor. Given a user's query and the structure of "
+        "its SQL result, decide the best chart type to visualize it.\n\n"
+        f"User query: \"{user_query}\"\n"
+        f"Result columns: {columns}\n"
+        f"Column dtypes: {col_types}\n"
+        f"Number of rows: {num_rows}\n"
+        f"Sample rows (first 3): {sample_rows}\n\n"
+        "Decision rules:\n"
+        "- If the result is a single row describing one specific item/entity → chart_type: none\n"
+        "- If comparing aggregates (counts, totals, averages) across categories → chart_type: bar\n"
+        "- If data is ordered over time or sequence → chart_type: line\n"
+        "- If showing proportions or percentages of a whole → chart_type: pie\n"
+        "- If showing correlation between two numeric columns → chart_type: scatter\n"
+        "- If result is mostly text, IDs, or not meaningfully comparable → chart_type: none\n\n"
+        "Pick the SINGLE best x_col (categorical/label axis) and y_col (numeric/value axis) "
+        "from the actual column names above. Use exact column names.\n\n"
+        "Respond ONLY with a valid JSON object — no markdown, no explanation:\n"
+        '{"chart_type": "<bar|line|pie|scatter|none>", "x_col": "<col_name or null>", '
+        '"y_col": "<col_name or null>", "title": "<short descriptive chart title or null>"}'
+    )
+
+    try:
+        raw = call_rewrite_llm([{"role": "user", "content": prompt}])
+        # Strip any accidental markdown fences
+        raw = re.sub(r"```(?:json)?", "", raw, flags=re.IGNORECASE).strip().rstrip("```").strip()
+        import json
+        config = json.loads(raw)
+
+        # Validate chart_type
+        valid_types = {"bar", "line", "pie", "scatter", "none"}
+        if config.get("chart_type") not in valid_types:
+            config["chart_type"] = "none"
+
+        # Validate column names exist in DataFrame
+        if config.get("x_col") and config["x_col"] not in columns:
+            config["x_col"] = None
+        if config.get("y_col") and config["y_col"] not in columns:
+            config["y_col"] = None
+
+        # If chart type needs axes but columns are missing → fall back to none
+        if config["chart_type"] in ("bar", "line", "scatter") and (
+            not config.get("x_col") or not config.get("y_col")
+        ):
+            config["chart_type"] = "none"
+
+        if config["chart_type"] == "pie" and not config.get("x_col"):
+            config["chart_type"] = "none"
+
+        return config
+
+    except Exception as e:
+        print(f"[decide_visualization] Failed: {e}")
+        return {"chart_type": "none", "x_col": None, "y_col": None, "title": None}
+
+
+# ============================================================
 # MAIN PIPELINE
 # ============================================================
 def nl2sql_pipeline(
@@ -441,11 +538,22 @@ def nl2sql_pipeline(
     except Exception:
         pass
 
+    # 12. Decide visualization (non-blocking — never fails the pipeline)
+    try:
+        viz_config = decide_visualization(user_query, result_df)
+    except Exception:
+        viz_config = {"chart_type": "none", "x_col": None, "y_col": None, "title": None}
+
+    # Serialize DataFrame rows for frontend chart rendering
+    result_data = result_df.to_dict(orient="records") if not result_df.empty else []
+
     return {
         "user_query":      user_query,
         "sql_query":       sql_query,
         "natural_answer":  natural_answer,
         "result_markdown": result_markdown,
+        "result_data":     result_data,
+        "viz_config":      viz_config,
         "error":           None
     }
 
@@ -456,5 +564,7 @@ def _error_response(user_query: str, error: str, sql_query: str = "N/A") -> dict
         "sql_query":       sql_query,
         "natural_answer":  None,
         "result_markdown": None,
+        "result_data":     [],
+        "viz_config":      {"chart_type": "none", "x_col": None, "y_col": None, "title": None},
         "error":           error
     }

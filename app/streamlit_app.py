@@ -352,6 +352,138 @@ def render_messages(messages: list):
 
 
 # ========================
+# CHART RENDERER
+# Renders a Plotly chart inline in the SQL chat.
+# Fixed cool blue palette — no theme switching.
+# chart_type: bar | line | pie | scatter
+# ========================
+
+BLUE_PALETTE  = ["#4ca3dd", "#1a6eb5", "#7ec8e3", "#0d3b6e",
+                  "#2d6a9f", "#a8d8ea", "#134f8a", "#5bb3d0"]
+BLUE_SINGLE   = "#4ca3dd"
+BLUE_GRID     = "rgba(76,163,221,0.12)"
+BLUE_PLOT_BG  = "rgba(0,0,0,0.15)"
+
+
+def _render_chart(viz_config: dict, result_data: list):
+    """
+    Render a Plotly chart inline in the SQL chat.
+    viz_config: {"chart_type": str, "x_col": str, "y_col": str, "title": str}
+    result_data: list of row dicts from the DataFrame
+    """
+    try:
+        import plotly.express as px
+        import pandas as pd
+
+        chart_type = viz_config.get("chart_type", "none")
+        x_col      = viz_config.get("x_col")
+        y_col      = viz_config.get("y_col")
+        title      = viz_config.get("title") or "Query Result"
+
+        if not result_data or chart_type == "none":
+            st.caption("📊 No visualization for this query.")
+            return
+
+        df = pd.DataFrame(result_data)
+
+        if x_col and x_col not in df.columns:
+            st.caption("📊 No visualization for this query.")
+            return
+        if y_col and y_col not in df.columns:
+            st.caption("📊 No visualization for this query.")
+            return
+
+        # ── Shared layout ─────────────────────────────────────────
+        layout_kwargs = dict(
+            title=title,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor=BLUE_PLOT_BG,
+            font=dict(color="white", family="sans-serif"),
+            title_font=dict(size=16, color="white"),
+            margin=dict(l=40, r=40, t=55, b=40),
+            xaxis=dict(
+                gridcolor=BLUE_GRID,
+                linecolor="rgba(255,255,255,0.2)",
+                tickfont=dict(color="white"),
+                title_font=dict(color="white"),
+            ),
+            yaxis=dict(
+                gridcolor=BLUE_GRID,
+                linecolor="rgba(255,255,255,0.2)",
+                tickfont=dict(color="white"),
+                title_font=dict(color="white"),
+            ),
+            legend=dict(font=dict(color="white")),
+        )
+
+        # ── Bar ───────────────────────────────────────────────────
+        if chart_type == "bar":
+            fig = px.bar(
+                df, x=x_col, y=y_col,
+                title=title,
+                color=x_col,
+                color_discrete_sequence=BLUE_PALETTE
+            )
+            fig.update_traces(marker_line_width=0)
+            fig.update_layout(**layout_kwargs)
+
+        # ── Line ──────────────────────────────────────────────────
+        elif chart_type == "line":
+            fig = px.line(
+                df, x=x_col, y=y_col,
+                title=title,
+                markers=True,
+                color_discrete_sequence=[BLUE_SINGLE]
+            )
+            fig.update_traces(
+                line=dict(width=2.5, color=BLUE_SINGLE),
+                marker=dict(size=7, color=BLUE_SINGLE,
+                            line=dict(width=1.5, color="white"))
+            )
+            fig.update_layout(**layout_kwargs)
+
+        # ── Pie / Donut ───────────────────────────────────────────
+        elif chart_type == "pie":
+            fig = px.pie(
+                df, names=x_col,
+                values=y_col if y_col else None,
+                title=title,
+                color_discrete_sequence=BLUE_PALETTE,
+                hole=0.38
+            )
+            fig.update_layout(**{
+                k: v for k, v in layout_kwargs.items()
+                if k not in ("xaxis", "yaxis")
+            })
+            fig.update_traces(
+                textfont_color="white",
+                textfont_size=12,
+                marker=dict(line=dict(color="rgba(0,0,0,0.4)", width=1.5))
+            )
+
+        # ── Scatter ───────────────────────────────────────────────
+        elif chart_type == "scatter":
+            fig = px.scatter(
+                df, x=x_col, y=y_col,
+                title=title,
+                color_discrete_sequence=[BLUE_SINGLE],
+                trendline="ols" if len(df) >= 5 else None
+            )
+            fig.update_traces(marker=dict(size=9, opacity=0.85,
+                                          line=dict(width=1, color="white")))
+            fig.update_layout(**layout_kwargs)
+
+        else:
+            st.caption("📊 No visualization for this query.")
+            return
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    except Exception as e:
+        st.caption(f"📊 Could not render chart: {e}")
+
+
+# ========================
 # AUTH PAGE
 # ========================
 def auth_page():
@@ -630,6 +762,16 @@ def sql_page():
                         st.code(content.get("sql_query", ""), language="sql")
                     with st.expander("📋 Data Result"):
                         st.markdown(content.get("result_markdown", "_No results._"))
+
+                    # ── Visualization ────────────────────────────────────
+                    viz_config  = content.get("viz_config", {})
+                    result_data = content.get("result_data", [])
+                    chart_type  = viz_config.get("chart_type", "none")
+
+                    if chart_type == "none" or not result_data:
+                        st.caption("📊 No visualization for this query.")
+                    else:
+                        _render_chart(viz_config, result_data)
             else:
                 st.markdown(
                     f'<div class="assistant-bubble">🤖 {content}</div>',
